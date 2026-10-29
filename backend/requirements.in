@@ -21,7 +21,7 @@ pyyaml==6.0.2
 pypdf==6.15.0
 # IAM-signed MCP client for the AgentCore Web Search Gateway connector (docs_agent).
 # Only used when WEB_SEARCH_GATEWAY_URL is set; import is guarded so it's optional.
-mcp-proxy-for-aws==1.6.2
+mcp-proxy-for-aws==1.7.0
 # In-app JWT signature verification against the Cognito JWKS (defense-in-depth,
 # LOG-ONLY phase — utils/auth.py). The [crypto] extra pulls `cryptography` for the
 # RS256 verification Cognito uses. Import is guarded: if unavailable, log-only
