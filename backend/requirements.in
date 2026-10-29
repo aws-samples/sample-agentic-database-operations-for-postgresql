@@ -26,4 +26,4 @@ mcp-proxy-for-aws==1.6.2
 # LOG-ONLY phase — utils/auth.py). The [crypto] extra pulls `cryptography` for the
 # RS256 verification Cognito uses. Import is guarded: if unavailable, log-only
 # verification degrades to a no-op and never blocks a request.
-PyJWT[crypto]==2.13.0
+PyJWT[crypto]==2.15.1
