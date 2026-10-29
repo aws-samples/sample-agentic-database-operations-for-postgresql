@@ -5,5 +5,5 @@
 # backend where they overlap. requirements.txt is the generated LOCK (pinned + hashed)
 # the image installs with --require-hashes; regenerate it with:  make lock
 boto3==1.43.36
-psycopg2-binary==2.9.10
+psycopg2-binary==2.9.13
 pyyaml==6.0.2
