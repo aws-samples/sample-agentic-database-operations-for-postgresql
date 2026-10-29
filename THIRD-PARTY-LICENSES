@@ -1,0 +1,1124 @@
+Third-party software
+====================
+
+This project's own code is licensed as stated in LICENSE. It depends on the
+third-party packages below, which are installed from PyPI and npm when the
+containers and web apps are built. None of them is modified or copied into this
+repository. Each package is listed with its version and licence; the full licence
+text ships with each package and is available at its source URL.
+
+Two packages use licences other than the permissive ones that cover the rest:
+  - psycopg2-binary (LGPL-3.0 with exceptions), backend and batch containers
+  - certifi (MPL-2.0), backend container
+Source for both is available from their PyPI pages listed below.
+
+
+Python packages (backend and batch containers)
+----------------------------------------------
+
+aiofile 3.12.3
+  Licence: Apache-2.0
+  Source:  https://github.com/mosquito/aiofile
+  Used by: backend
+
+aiohappyeyeballs 2.7.1
+  Licence: Python Software Foundation License
+  Source:  https://github.com/aio-libs/aiohappyeyeballs
+  Used by: backend
+
+aiohttp 3.14.3
+  Licence: Apache-2.0 AND MIT
+  Source:  https://github.com/aio-libs/aiohttp
+  Used by: backend
+
+aiosignal 1.4.0
+  Licence: Apache Software License
+  Source:  https://github.com/aio-libs/aiosignal
+  Used by: backend
+
+annotated-doc 0.0.5
+  Licence: MIT
+  Source:  https://github.com/fastapi/annotated-doc
+  Used by: backend
+
+annotated-types 0.8.0
+  Licence: MIT
+  Source:  https://github.com/annotated-types/annotated-types
+  Used by: backend
+
+anyio 4.15.1
+  Licence: MIT
+  Source:  https://github.com/agronholm/anyio
+  Used by: backend
+
+attrs 26.1.0
+  Licence: MIT
+  Source:  https://github.com/python-attrs/attrs
+  Used by: backend
+
+Authlib 1.8.0
+  Licence: BSD License
+  Source:  https://github.com/authlib/authlib
+  Used by: backend
+
+aws-requests-auth 0.4.3
+  Licence: BSD License
+  Source:  https://github.com/davidmuller/aws-requests-auth
+  Used by: backend
+
+awscrt 0.36.0
+  Licence: Apache-2.0
+  Source:  https://github.com/awslabs/aws-crt-python
+  Used by: backend
+
+beartype 0.22.9
+  Licence: MIT License
+  Source:  https://github.com/beartype/beartype
+  Used by: backend
+
+beautifulsoup4 4.15.0
+  Licence: MIT License
+  Source:  https://www.crummy.com/software/BeautifulSoup/bs4/
+  Used by: backend
+
+bedrock-agentcore 1.18.1
+  Licence: Apache Software License
+  Source:  https://github.com/aws/bedrock-agentcore-sdk-python
+  Used by: backend
+
+boto3 1.43.36
+  Licence: Apache-2.0
+  Source:  https://github.com/boto/boto3
+  Used by: backend, batch
+
+botocore 1.43.93
+  Licence: Apache-2.0
+  Source:  https://github.com/boto/botocore
+  Used by: backend, batch
+
+cachetools 7.1.8
+  Licence: MIT
+  Source:  https://github.com/tkem/cachetools/
+  Used by: backend
+
+caio 0.12.4
+  Licence: Apache-2.0
+  Source:  https://github.com/mosquito/caio/
+  Used by: backend
+
+certifi 2026.7.22
+  Licence: Mozilla Public License 2.0 (MPL 2.0)
+  Source:  https://pypi.org/project/certifi/2026.7.22/
+  Used by: backend
+
+cffi 2.1.1
+  Licence: MIT-0
+  Source:  https://github.com/python-cffi/cffi
+  Used by: backend
+
+charset-normalizer 3.5.1
+  Licence: MIT
+  Source:  https://github.com/jawah/charset_normalizer
+  Used by: backend
+
+click 8.5.0
+  Licence: BSD-3-Clause
+  Source:  https://github.com/pallets/click/
+  Used by: backend
+
+cryptography 50.0.1
+  Licence: Apache-2.0 OR BSD-3-Clause
+  Source:  https://github.com/pyca/cryptography/
+  Used by: backend
+
+cyclopts 4.25.2
+  Licence: Apache-2.0
+  Source:  https://github.com/BrianPugh/cyclopts
+  Used by: backend
+
+dill 0.4.1
+  Licence: BSD License
+  Source:  https://github.com/uqfoundation/dill
+  Used by: backend
+
+dnspython 2.8.0
+  Licence: ISC License (ISCL)
+  Source:  https://github.com/rthalley/dnspython
+  Used by: backend
+
+docstring_parser 0.18.0
+  Licence: MIT License
+  Source:  https://github.com/rr-/docstring_parser
+  Used by: backend
+
+email-validator 2.3.0
+  Licence: The Unlicense (Unlicense)
+  Source:  https://github.com/JoshData/python-email-validator
+  Used by: backend
+
+exceptiongroup 1.3.1
+  Licence: MIT License
+  Source:  https://github.com/agronholm/exceptiongroup
+  Used by: backend
+
+fastapi 0.123.1
+  Licence: MIT
+  Source:  https://github.com/fastapi/fastapi
+  Used by: backend
+
+fastmcp 3.4.0
+  Licence: Apache-2.0
+  Source:  https://github.com/PrefectHQ/fastmcp
+  Used by: backend
+
+fastmcp-slim 3.4.0
+  Licence: Apache-2.0
+  Source:  https://github.com/PrefectHQ/fastmcp
+  Used by: backend
+
+frozenlist 1.8.0
+  Licence: Apache-2.0
+  Source:  https://github.com/aio-libs/frozenlist
+  Used by: backend
+
+griffelib 2.3.0
+  Licence: ISC
+  Used by: backend
+
+h11 0.16.0
+  Licence: MIT License
+  Source:  https://github.com/python-hyper/h11
+  Used by: backend
+
+httpcore 1.0.9
+  Licence: BSD-3-Clause
+  Source:  https://github.com/encode/httpcore
+  Used by: backend
+
+httptools 0.8.0
+  Licence: MIT
+  Source:  https://github.com/MagicStack/httptools
+  Used by: backend
+
+httpx 0.28.1
+  Licence: BSD License
+  Source:  https://github.com/encode/httpx
+  Used by: backend
+
+httpx-sse 0.4.3
+  Licence: MIT
+  Source:  https://github.com/florimondmanca/httpx-sse
+  Used by: backend
+
+idna 3.19
+  Licence: BSD-3-Clause
+  Source:  https://github.com/kjd/idna
+  Used by: backend
+
+jaraco.classes 3.4.0
+  Licence: MIT License
+  Source:  https://github.com/jaraco/jaraco.classes
+  Used by: backend
+
+jaraco.context 6.1.2
+  Licence: MIT
+  Source:  https://github.com/jaraco/jaraco.context
+  Used by: backend
+
+jaraco.functools 4.6.0
+  Licence: MIT
+  Source:  https://github.com/jaraco/jaraco.functools
+  Used by: backend
+
+jmespath 1.1.0
+  Licence: MIT License
+  Source:  https://github.com/jmespath/jmespath.py
+  Used by: backend, batch
+
+joserfc 1.7.5
+  Licence: BSD License
+  Source:  https://github.com/authlib/joserfc
+  Used by: backend
+
+jsonref 1.1.0
+  Licence: MIT
+  Source:  https://github.com/gazpachoking/jsonref
+  Used by: backend
+
+jsonschema 4.26.0
+  Licence: MIT
+  Source:  https://github.com/python-jsonschema/jsonschema
+  Used by: backend
+
+jsonschema-path 0.5.0
+  Licence: Apache Software License
+  Source:  https://github.com/p1c2u/jsonschema-path
+  Used by: backend
+
+jsonschema-specifications 2025.9.1
+  Licence: MIT
+  Source:  https://github.com/python-jsonschema/jsonschema-specifications
+  Used by: backend
+
+keyring 25.7.0
+  Licence: MIT
+  Source:  https://github.com/jaraco/keyring
+  Used by: backend
+
+markdown-it-py 4.2.0
+  Licence: MIT License
+  Source:  https://github.com/executablebooks/markdown-it-py
+  Used by: backend
+
+markdownify 1.2.3
+  Licence: MIT License
+  Source:  http://github.com/matthewwithanm/python-markdownify
+  Used by: backend
+
+mcp 1.30.0
+  Licence: MIT License
+  Source:  https://github.com/modelcontextprotocol/python-sdk
+  Used by: backend
+
+mcp-proxy-for-aws 1.6.2
+  Licence: Apache Software License
+  Source:  https://github.com/aws/mcp-proxy-for-aws
+  Used by: backend
+
+mdurl 0.1.2
+  Licence: MIT License
+  Source:  https://github.com/executablebooks/mdurl
+  Used by: backend
+
+more-itertools 11.1.0
+  Licence: MIT
+  Source:  https://github.com/more-itertools/more-itertools
+  Used by: backend
+
+mpmath 1.3.0
+  Licence: BSD License
+  Source:  http://mpmath.org/
+  Used by: backend
+
+multidict 6.8.0
+  Licence: Apache License 2.0
+  Source:  https://github.com/aio-libs/multidict
+  Used by: backend
+
+openapi-pydantic 0.5.1
+  Licence: MIT License
+  Source:  https://github.com/mike-oakley/openapi-pydantic
+  Used by: backend
+
+opentelemetry-api 1.44.0
+  Licence: Apache-2.0
+  Source:  https://github.com/open-telemetry/opentelemetry-python
+  Used by: backend
+
+opentelemetry-instrumentation 0.65b0
+  Licence: Apache-2.0
+  Source:  https://github.com/open-telemetry/opentelemetry-python-contrib
+  Used by: backend
+
+opentelemetry-instrumentation-threading 0.65b0
+  Licence: Apache-2.0
+  Source:  https://github.com/open-telemetry/opentelemetry-python-contrib
+  Used by: backend
+
+opentelemetry-sdk 1.44.0
+  Licence: Apache-2.0
+  Source:  https://github.com/open-telemetry/opentelemetry-python
+  Used by: backend
+
+opentelemetry-semantic-conventions 0.65b0
+  Licence: Apache-2.0
+  Source:  https://github.com/open-telemetry/opentelemetry-python
+  Used by: backend
+
+packaging 26.3
+  Licence: Apache-2.0 OR BSD-2-Clause
+  Source:  https://github.com/pypa/packaging
+  Used by: backend
+
+pathable 0.6.0
+  Licence: Apache Software License
+  Source:  https://github.com/p1c2u/pathable
+  Used by: backend
+
+pillow 12.3.0
+  Licence: MIT-CMU
+  Source:  https://github.com/python-pillow/Pillow
+  Used by: backend
+
+platformdirs 4.11.8
+  Licence: MIT
+  Source:  https://github.com/tox-dev/platformdirs
+  Used by: backend
+
+prompt_toolkit 3.0.53
+  Licence: BSD License
+  Source:  https://github.com/prompt-toolkit/python-prompt-toolkit
+  Used by: backend
+
+propcache 0.5.2
+  Licence: Apache Software License
+  Source:  https://github.com/aio-libs/propcache
+  Used by: backend
+
+psycopg2-binary 2.9.10
+  Licence: GNU Library or Lesser General Public License (LGPL)
+  Source:  https://pypi.org/project/psycopg2-binary/2.9.10/
+  Used by: backend, batch
+
+py-key-value-aio 0.4.5
+  Licence: Apache-2.0
+  Used by: backend
+
+pycparser 3.0
+  Licence: BSD-3-Clause
+  Source:  https://github.com/eliben/pycparser
+  Used by: backend
+
+pydantic 2.13.5
+  Licence: MIT
+  Source:  https://github.com/pydantic/pydantic
+  Used by: backend
+
+pydantic-settings 2.15.0
+  Licence: MIT
+  Source:  https://github.com/pydantic/pydantic-settings
+  Used by: backend
+
+pydantic_core 2.46.5
+  Licence: MIT
+  Source:  https://github.com/pydantic/pydantic
+  Used by: backend
+
+Pygments 2.21.0
+  Licence: BSD-2-Clause
+  Source:  https://github.com/pygments/pygments
+  Used by: backend
+
+PyJWT 2.13.0
+  Licence: MIT
+  Source:  https://github.com/jpadilla/pyjwt
+  Used by: backend
+
+pypdf 6.15.0
+  Licence: BSD-3-Clause
+  Source:  https://github.com/py-pdf/pypdf
+  Used by: backend
+
+pyperclip 1.11.0
+  Licence: BSD License
+  Source:  https://github.com/asweigart/pyperclip
+  Used by: backend
+
+python-dateutil 2.9.0.post0
+  Licence: BSD License; Apache Software License
+  Source:  https://github.com/dateutil/dateutil
+  Used by: backend, batch
+
+python-dotenv 1.2.2
+  Licence: BSD-3-Clause
+  Source:  https://github.com/theskumar/python-dotenv
+  Used by: backend
+
+python-multipart 0.0.32
+  Licence: Apache-2.0
+  Source:  https://github.com/Kludex/python-multipart
+  Used by: backend
+
+PyYAML 6.0.2
+  Licence: MIT License
+  Source:  https://pyyaml.org/
+  Used by: backend, batch
+
+referencing 0.37.0
+  Licence: MIT
+  Source:  https://github.com/python-jsonschema/referencing
+  Used by: backend
+
+requests 2.34.2
+  Licence: Apache Software License
+  Source:  https://github.com/psf/requests
+  Used by: backend
+
+rich 14.3.4
+  Licence: MIT License
+  Source:  https://github.com/Textualize/rich
+  Used by: backend
+
+rich-rst 2.1.0
+  Licence: MIT
+  Source:  https://github.com/wasi-master/rich-rst
+  Used by: backend
+
+rpds-py 2026.6.3
+  Licence: MIT
+  Source:  https://github.com/crate-py/rpds
+  Used by: backend
+
+s3transfer 0.19.2
+  Licence: Apache Software License
+  Source:  https://github.com/boto/s3transfer
+  Used by: backend, batch
+
+six 1.17.0
+  Licence: MIT License
+  Source:  https://github.com/benjaminp/six
+  Used by: backend, batch
+
+slack_bolt 1.30.0
+  Licence: MIT License
+  Source:  https://github.com/slackapi/bolt-python
+  Used by: backend
+
+slack_sdk 3.44.1
+  Licence: MIT License
+  Source:  https://github.com/slackapi/python-slack-sdk
+  Used by: backend
+
+soupsieve 2.9.2
+  Licence: MIT
+  Source:  https://github.com/facelessuser/soupsieve
+  Used by: backend
+
+sse-starlette 3.4.11
+  Licence: BSD-3-Clause
+  Source:  https://github.com/sysid/sse-starlette
+  Used by: backend
+
+starlette 0.50.0
+  Licence: BSD-3-Clause
+  Source:  https://github.com/Kludex/starlette
+  Used by: backend
+
+strands-agents 1.45.0
+  Licence: Apache Software License
+  Source:  https://github.com/strands-agents/harness-sdk
+  Used by: backend
+
+strands-agents-tools 0.8.2
+  Licence: Apache Software License
+  Source:  https://github.com/strands-agents/tools
+  Used by: backend
+
+sympy 1.14.0
+  Licence: BSD License
+  Source:  https://sympy.org
+  Used by: backend
+
+tenacity 9.1.4
+  Licence: Apache Software License
+  Source:  https://github.com/jd/tenacity
+  Used by: backend
+
+typing-inspection 0.4.4
+  Licence: MIT
+  Source:  https://github.com/pydantic/typing-inspection
+  Used by: backend
+
+typing_extensions 4.16.0
+  Licence: PSF-2.0
+  Source:  https://github.com/python/typing_extensions
+  Used by: backend
+
+uncalled-for 0.4.0
+  Licence: MIT License
+  Source:  https://github.com/chrisguidry/uncalled-for
+  Used by: backend
+
+urllib3 2.7.0
+  Licence: MIT
+  Source:  https://github.com/urllib3/urllib3
+  Used by: backend, batch
+
+uvicorn 0.38.0
+  Licence: BSD-3-Clause
+  Source:  https://github.com/Kludex/uvicorn
+  Used by: backend
+
+uvloop 0.22.1
+  Licence: Apache Software License; MIT License
+  Source:  https://github.com/MagicStack/uvloop
+  Used by: backend
+
+watchdog 6.0.0
+  Licence: Apache Software License
+  Source:  https://github.com/gorakhargosh/watchdog
+  Used by: backend
+
+watchfiles 1.2.0
+  Licence: MIT License
+  Source:  https://github.com/samuelcolvin/watchfiles
+  Used by: backend
+
+websockets 17.1
+  Licence: BSD-3-Clause
+  Source:  https://github.com/python-websockets/websockets
+  Used by: backend
+
+wrapt 2.4.1
+  Licence: BSD-2-Clause
+  Source:  https://github.com/GrahamDumpleton/wrapt
+  Used by: backend
+
+yarl 1.24.5
+  Licence: Apache-2.0
+  Source:  https://github.com/aio-libs/yarl
+  Used by: backend
+
+
+JavaScript packages bundled into the web apps (production dependencies)
+-----------------------------------------------------------------------
+
+@types/debug 4.1.12
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/estree 1.0.9
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/estree-jsx 1.0.5
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/hast 3.0.4
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/mdast 4.0.4
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/ms 2.1.0
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/prop-types 15.7.15
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/react 18.3.28
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@types/unist 2.0.11, 3.0.3
+  Licence: MIT
+  Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
+  Used by: frontend
+
+@ungap/structured-clone 1.3.0
+  Licence: ISC
+  Source:  https://github.com/ungap/structured-clone
+  Used by: frontend
+
+bail 2.0.2
+  Licence: MIT
+  Source:  https://github.com/wooorm/bail
+  Used by: frontend
+
+ccount 2.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/ccount
+  Used by: frontend
+
+character-entities 2.0.2
+  Licence: MIT
+  Source:  https://github.com/wooorm/character-entities
+  Used by: frontend
+
+character-entities-html4 2.1.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/character-entities-html4
+  Used by: frontend
+
+character-entities-legacy 3.0.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/character-entities-legacy
+  Used by: frontend
+
+character-reference-invalid 2.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/character-reference-invalid
+  Used by: frontend
+
+comma-separated-tokens 2.0.3
+  Licence: MIT
+  Source:  https://github.com/wooorm/comma-separated-tokens
+  Used by: frontend
+
+csstype 3.2.3
+  Licence: MIT
+  Source:  https://github.com/frenic/csstype
+  Used by: frontend
+
+debug 4.4.3
+  Licence: MIT
+  Source:  https://github.com/debug-js/debug
+  Used by: frontend
+
+decode-named-character-reference 1.3.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/decode-named-character-reference
+  Used by: frontend
+
+dequal 2.0.3
+  Licence: MIT
+  Source:  https://github.com/lukeed/dequal
+  Used by: frontend
+
+devlop 1.1.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/devlop
+  Used by: frontend
+
+escape-string-regexp 5.0.0
+  Licence: MIT
+  Source:  https://github.com/sindresorhus/escape-string-regexp
+  Used by: frontend
+
+estree-util-is-identifier-name 3.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/estree-util-is-identifier-name
+  Used by: frontend
+
+extend 3.0.2
+  Licence: MIT
+  Source:  https://github.com/justmoon/node-extend
+  Used by: frontend
+
+hast-util-to-jsx-runtime 2.3.6
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/hast-util-to-jsx-runtime
+  Used by: frontend
+
+hast-util-whitespace 3.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/hast-util-whitespace
+  Used by: frontend
+
+html-url-attributes 3.0.1
+  Licence: MIT
+  Source:  https://github.com/rehypejs/rehype-minify.git#main
+  Used by: frontend
+
+inline-style-parser 0.2.7
+  Licence: MIT
+  Source:  https://github.com/remarkablemark/inline-style-parser
+  Used by: frontend
+
+is-alphabetical 2.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/is-alphabetical
+  Used by: frontend
+
+is-alphanumerical 2.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/is-alphanumerical
+  Used by: frontend
+
+is-decimal 2.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/is-decimal
+  Used by: frontend
+
+is-hexadecimal 2.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/is-hexadecimal
+  Used by: frontend
+
+is-plain-obj 4.1.0
+  Licence: MIT
+  Source:  https://github.com/sindresorhus/is-plain-obj
+  Used by: frontend
+
+js-tokens 4.0.0
+  Licence: MIT
+  Source:  https://github.com/lydell/js-tokens
+  Used by: admin-console, frontend
+
+jwt-decode 4.0.0
+  Licence: MIT
+  Source:  https://github.com/auth0/jwt-decode
+  Used by: admin-console, frontend
+
+longest-streak 3.1.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/longest-streak
+  Used by: frontend
+
+loose-envify 1.4.0
+  Licence: MIT
+  Source:  https://github.com/zertosh/loose-envify
+  Used by: admin-console, frontend
+
+lucide-react 1.47.0
+  Licence: ISC
+  Source:  https://github.com/lucide-icons/lucide
+  Used by: admin-console, frontend
+
+markdown-table 3.0.4
+  Licence: MIT
+  Source:  https://github.com/wooorm/markdown-table
+  Used by: frontend
+
+mdast-util-find-and-replace 3.0.2
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-find-and-replace
+  Used by: frontend
+
+mdast-util-from-markdown 2.0.2
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-from-markdown
+  Used by: frontend
+
+mdast-util-gfm 3.1.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-gfm
+  Used by: frontend
+
+mdast-util-gfm-autolink-literal 2.0.1
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-gfm-autolink-literal
+  Used by: frontend
+
+mdast-util-gfm-footnote 2.1.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-gfm-footnote
+  Used by: frontend
+
+mdast-util-gfm-strikethrough 2.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-gfm-strikethrough
+  Used by: frontend
+
+mdast-util-gfm-table 2.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-gfm-table
+  Used by: frontend
+
+mdast-util-gfm-task-list-item 2.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-gfm-task-list-item
+  Used by: frontend
+
+mdast-util-mdx-expression 2.0.1
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-mdx-expression
+  Used by: frontend
+
+mdast-util-mdx-jsx 3.2.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-mdx-jsx
+  Used by: frontend
+
+mdast-util-mdxjs-esm 2.0.1
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-mdxjs-esm
+  Used by: frontend
+
+mdast-util-phrasing 4.1.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-phrasing
+  Used by: frontend
+
+mdast-util-to-hast 13.2.1
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-to-hast
+  Used by: frontend
+
+mdast-util-to-markdown 2.1.2
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-to-markdown
+  Used by: frontend
+
+mdast-util-to-string 4.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/mdast-util-to-string
+  Used by: frontend
+
+micromark 4.0.2
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-core-commonmark 2.0.3
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-extension-gfm 3.0.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm
+  Used by: frontend
+
+micromark-extension-gfm-autolink-literal 2.1.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm-autolink-literal
+  Used by: frontend
+
+micromark-extension-gfm-footnote 2.1.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm-footnote
+  Used by: frontend
+
+micromark-extension-gfm-strikethrough 2.1.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm-strikethrough
+  Used by: frontend
+
+micromark-extension-gfm-table 2.1.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm-table
+  Used by: frontend
+
+micromark-extension-gfm-tagfilter 2.0.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm-tagfilter
+  Used by: frontend
+
+micromark-extension-gfm-task-list-item 2.1.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark-extension-gfm-task-list-item
+  Used by: frontend
+
+micromark-factory-destination 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-factory-label 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-factory-space 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-factory-title 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-factory-whitespace 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-character 2.1.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-chunked 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-classify-character 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-combine-extensions 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-decode-numeric-character-reference 2.0.2
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-decode-string 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-encode 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-html-tag-name 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-normalize-identifier 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-resolve-all 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-sanitize-uri 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-subtokenize 2.1.0
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-symbol 2.0.1
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+micromark-util-types 2.0.2
+  Licence: MIT
+  Source:  https://github.com/micromark/micromark.git#main
+  Used by: frontend
+
+ms 2.1.3
+  Licence: MIT
+  Source:  https://github.com/vercel/ms
+  Used by: frontend
+
+parse-entities 4.0.2
+  Licence: MIT
+  Source:  https://github.com/wooorm/parse-entities
+  Used by: frontend
+
+property-information 7.1.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/property-information
+  Used by: frontend
+
+qrcode.react 4.2.0
+  Licence: ISC
+  Source:  https://github.com/zpao/qrcode.react
+  Used by: admin-console, frontend
+
+react 18.3.1
+  Licence: MIT
+  Source:  https://github.com/facebook/react
+  Used by: admin-console, frontend
+
+react-dom 18.3.1
+  Licence: MIT
+  Source:  https://github.com/facebook/react
+  Used by: admin-console, frontend
+
+react-markdown 9.1.0
+  Licence: MIT
+  Source:  https://github.com/remarkjs/react-markdown
+  Used by: frontend
+
+remark-gfm 4.0.1
+  Licence: MIT
+  Source:  https://github.com/remarkjs/remark-gfm
+  Used by: frontend
+
+remark-parse 11.0.0
+  Licence: MIT
+  Source:  https://github.com/remarkjs/remark.git#main
+  Used by: frontend
+
+remark-rehype 11.1.2
+  Licence: MIT
+  Source:  https://github.com/remarkjs/remark-rehype
+  Used by: frontend
+
+remark-stringify 11.0.0
+  Licence: MIT
+  Source:  https://github.com/remarkjs/remark.git#main
+  Used by: frontend
+
+scheduler 0.23.2
+  Licence: MIT
+  Source:  https://github.com/facebook/react
+  Used by: admin-console, frontend
+
+space-separated-tokens 2.0.2
+  Licence: MIT
+  Source:  https://github.com/wooorm/space-separated-tokens
+  Used by: frontend
+
+stringify-entities 4.0.4
+  Licence: MIT
+  Source:  https://github.com/wooorm/stringify-entities
+  Used by: frontend
+
+style-to-js 1.1.21
+  Licence: MIT
+  Source:  https://github.com/remarkablemark/style-to-js
+  Used by: frontend
+
+style-to-object 1.0.14
+  Licence: MIT
+  Source:  https://github.com/remarkablemark/style-to-object
+  Used by: frontend
+
+trim-lines 3.0.1
+  Licence: MIT
+  Source:  https://github.com/wooorm/trim-lines
+  Used by: frontend
+
+trough 2.2.0
+  Licence: MIT
+  Source:  https://github.com/wooorm/trough
+  Used by: frontend
+
+unified 11.0.5
+  Licence: MIT
+  Source:  https://github.com/unifiedjs/unified
+  Used by: frontend
+
+unist-util-is 6.0.1
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/unist-util-is
+  Used by: frontend
+
+unist-util-position 5.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/unist-util-position
+  Used by: frontend
+
+unist-util-stringify-position 4.0.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/unist-util-stringify-position
+  Used by: frontend
+
+unist-util-visit 5.1.0
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/unist-util-visit
+  Used by: frontend
+
+unist-util-visit-parents 6.0.2
+  Licence: MIT
+  Source:  https://github.com/syntax-tree/unist-util-visit-parents
+  Used by: frontend
+
+vfile 6.0.3
+  Licence: MIT
+  Source:  https://github.com/vfile/vfile
+  Used by: frontend
+
+vfile-message 4.0.3
+  Licence: MIT
+  Source:  https://github.com/vfile/vfile-message
+  Used by: frontend
+
+zwitch 2.0.4
+  Licence: MIT
+  Source:  https://github.com/wooorm/zwitch
+  Used by: frontend

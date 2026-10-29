@@ -1,0 +1,85 @@
+Payments
+Payments databases
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+2 databases
+2
+reachable
+metadata refreshed for 2 of 2
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+2 onboarded · 1 found, not onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+4
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Resource Topology
+Databases, VPCs and the connection the agent has to each of them. Reachability reflects the recorded state of each connection, not a live probe. Generated <date>.
+Refresh metadata
+2
+Databases
+1
+VPCs
+1
+Connections
+2
+Reachable
+0
+Pending or blocked
+2/2
+Metadata refreshed
+All health
+Critical
+Warning
+Healthy
+Unknown health
+All reachability
+Reachable
+Pending
+Blocked
+Unknown
+SVG
+PNG
+2 databases
+2 reachable
+metadata collected for 2, refreshed for 2
+Agent VPC
+<aws-id>
+10.90.0.0/16
+1 connection
+Account 111122223333
+us-east-1
+0db0000000000… 10.20.0.0/16
+billing-cluster
+database · v16.4 · db.r6g.large
+2 members
+orders-db
+database · v16.4 · db.r6g.large
+reachable
+VPC peering
+Health
+ok
+warning
+critical
+unknown
+Reach
+reachable
+pending
+blocked
+unknown
+active
+creating
+failed
+Operators
+4 of 5 stages done.
+Finish: Overview

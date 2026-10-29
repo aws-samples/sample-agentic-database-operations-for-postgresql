@@ -1,0 +1,13 @@
+Add secondary cloud source
+Connect another AWS account to this Agent Space: your access role must be in that account, then register the account here.
+1
+Set up the role
+2
+Connect to the Agent Space
+Secondary account ID *
+The AWS account that holds the databases.
+Role name
+Only if your naming policy requires it. Keep the dbops-agent- start: the deployment assumes only dbops-* roles, and the version check reads dbops-agent-* roles.
+This deployment may not assume acme-reader: its role can assume only roles named dbops-*. Use a name that starts with dbops-.
+Cancel
+Next

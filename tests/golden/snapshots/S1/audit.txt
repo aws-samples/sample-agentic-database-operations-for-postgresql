@@ -1,0 +1,101 @@
+Payments
+Payments databases
+Owner: alice@example.com
+Overview
+Audit log
+Active
+DBOps Agent (Beta) can discover and monitor the databases in this Agent Space.
+Topology generated <date>
+2 databases
+2
+reachable
+metadata refreshed for 2 of 2
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+2 onboarded · 1 found, not onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+Operators
+1 operator have access
+Topology
+Map generated <date>
+Audit log
+Every admin action on this space, newest first. Vault on: new records are locked for 365 days.
+24 h
+7 d
+30 d
+90 d
+All
+Custom
+All actions
+Created space
+Changed space details
+Deleted space
+Finished deleting space
+Validated account access
+Ran discovery
+Dismissed discovered database
+Onboarded database
+Removed database from space
+Finished removing database
+Database removal incomplete
+Detected cluster failover
+Repaired cross-Region host routes
+Added operator
+Removed operator
+Switched audit vault
+7 events
+DETAILS
+TIME WHO ACTION TARGET VAULT
+<date>
+alice@example.com
+Space admin
+Added operator
+space_user_assign
+Olga Operator
+In vault
+<date>
+alice@example.com
+Space admin
+Onboarded database
+space_db_onboard
+billing-cluster
+In vault
+<date>
+alice@example.com
+Space admin
+Onboarded database
+space_db_onboard
+orders-db
+In vault
+<date>
+alice@example.com
+Space admin
+Ran discovery
+space_discover
+Payments
+In vault
+<date>
+alice@example.com
+Space admin
+Validated account access
+space_access_configure
+Payments
+In vault
+<date>
+alice@example.com
+Space admin
+Changed space details
+space_update
+Payments
+In vault
+<date>
+alice@example.com
+Space admin
+Created space
+space_create
+Payments
+In vault

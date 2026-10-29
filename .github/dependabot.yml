@@ -1,0 +1,50 @@
+# Dependabot keeps the pinned dependencies and base-image digests from silently going
+# stale. It opens a pull request (including security updates for known CVEs) when a newer
+# version or digest is available, so a digest-pinned base image or a hashed dependency
+# lock cannot quietly fall behind on patches. A maintainer reviews and merges the PR.
+#
+# After a Python dependency PR, refresh the hashed locks with `make lock` (Dependabot
+# updates the declared versions; the --require-hashes locks are regenerated from them).
+version: 2
+updates:
+  # ── Python dependencies ──
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "pip"
+    directory: "/batch"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # ── Container base images (digest pins) ──
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/batch"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/admin-console"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  # ── Front-end JavaScript dependencies ──
+  - package-ecosystem: "npm"
+    directory: "/admin-console"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

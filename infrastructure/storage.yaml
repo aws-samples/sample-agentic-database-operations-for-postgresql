@@ -1,0 +1,1005 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DynamoDB table and S3 bucket for DB Optimization Agent
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, Aurora cluster identifiers and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for SNS notifications (leave empty to skip subscription)
+
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Days to retain access logs in the log-archive bucket.
+
+  EmailSenderAddress:
+    Type: String
+    Default: ''
+    AllowedPattern: '^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|)$'
+    Description: >
+      Verified SES address the deployment sends invitation emails from. Seeds the
+      governance record the admin console would otherwise have to fill in by hand.
+      The address must already be a verified SES identity in this account and region
+      before invitations can be delivered - seeding removes the configuration step,
+      not the verification step. Leave empty to configure it later in the console.
+      Not needed to sign in: the initial admin user and `make cognito-user` both
+      work without SES.
+
+  EmailSenderName:
+    Type: String
+    Default: ''
+    Description: >
+      Display name shown as the sender of invitation emails, e.g. "DB Ops Agent".
+      Only used when EmailSenderAddress is set.
+
+  AuditRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 3653
+    Description: >
+      Minimum days each admin audit record is locked against deletion or change
+      (S3 Object Lock, COMPLIANCE). A super admin can raise the retention of new
+      records in the console, never below this value. Changing it affects new records
+      only; an existing record's lock is never shortened.
+
+  AuditVault:
+    Type: String
+    Default: 'on'
+    AllowedValues: ['on', 'off']
+    Description: >
+      Initial state of the audit vault switch. Read only by the email-sender seed
+      function in this stack (see EmailSenderSeedFunction).
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+  HasEmailSender: !Not [!Equals [!Ref EmailSenderAddress, '']]
+
+Resources:
+  # ── Central log-archive bucket ──
+  # Standard pattern: one private, encrypted, lifecycle-bounded bucket that
+  # receives S3 server-access logs for this deployment. Lives in the customer's
+  # own account. ACLs are disabled (BucketOwnerEnforced) and log delivery is
+  # granted via bucket policy (the modern, ACL-free, region-portable approach);
+  # public access is fully blocked. Datadog/Splunk customers can forward from
+  # here, or redirect entirely (see master.yaml).
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-logs-${AWS::AccountId}-${AWS::Region}'
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: !Ref LogRetentionDays
+
+  # Grant the S3 logging service permission to deliver server-access logs.
+  # Required when the target bucket has ACLs disabled (BucketOwnerEnforced).
+  # SourceAccount scopes delivery to this account's buckets only.
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${LogBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+          # Deny anything that did not arrive over TLS (AwsSolutions-S10): S3
+          # accepts plain HTTP unless a policy refuses it.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt LogBucket.Arn
+              - !Sub '${LogBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # Stateful resources below carry:
+  #   - SSESpecification (SSEEnabled: true) — at-rest encryption with the AWS managed
+  #     KMS key, aws/dynamodb (key usage visible in KMS and CloudTrail). Clears
+  #     CKV_AWS_119.
+  #   - PointInTimeRecoverySpecification — continuous backups / 35-day restore.
+  #     Clears W78 / CKV_AWS_28.
+  #   - DeletionPolicy + UpdateReplacePolicy: Retain — prevents accidental data
+  #     loss on stack delete/replace (config state, network mappings, findings).
+
+  # First table: the other eleven DependsOn it. In an account that has never used
+  # DynamoDB encryption, the aws/dynamodb key is created by the first CreateTable that
+  # needs it, and tables created in the same instant can be refused with "KMS key ...
+  # does not exist" before it propagates (a first deploy failed that way). Creating
+  # this one first makes the key exist before the rest ask for it; on an existing
+  # stack the dependency only orders changes and replaces nothing.
+  InstancesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Named from the prefix like every other table here, so the application's lookup
+      # of '<prefix>-instances' always resolves. This is the database registry — the one
+      # table everything else depends on — so a CloudFormation-generated name would
+      # surface as a ResourceNotFoundException across the app.
+      TableName: !Sub '${ResourcePrefix}-instances'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: instance_id
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+        # Top-level physical-DB identity (the cluster/instance ARN). Backs arn-index
+        # so a physical DB maps to exactly one registry record (DB-level tenancy):
+        # discovery attaches a space to the existing record instead of duplicating it.
+        - AttributeName: arn
+          AttributeType: S
+      KeySchema:
+        - AttributeName: instance_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: account-index
+          KeySchema:
+            - AttributeName: account_id
+              KeyType: HASH
+            - AttributeName: instance_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: arn-index
+          KeySchema:
+            - AttributeName: arn
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  SpacesTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-spaces'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: space_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: space_id
+          KeyType: HASH
+
+  # ── Model & Knowledge Governance (model-and-knowledge-governance feature) ──
+  ConfigTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-config'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: config_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: config_key
+          KeyType: HASH
+
+  AuditTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-audit'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: entity
+          AttributeType: S
+        - AttributeName: ts
+          AttributeType: S
+        # Only admin primary rows carry `month` (YYYY-MM of ts), so month-index is a
+        # sparse index of admin events: the console's global view walks it month by
+        # month. Agent rows and per-space fan-out copies never appear in it.
+        - AttributeName: month
+          AttributeType: S
+      KeySchema:
+        - AttributeName: entity
+          KeyType: HASH
+        - AttributeName: ts
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: month-index
+          KeySchema:
+            - AttributeName: month
+              KeyType: HASH
+            - AttributeName: ts
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # ── Email-sender seed (optional) ──────────────────────────────────────────
+  # The invitation gate in the API reads a DynamoDB record, not the user pool's
+  # EmailConfiguration, so setting EmailConfiguration on the pool alone would leave
+  # the record empty and every invite would fail with 409 forever. This seeds that
+  # record from a CloudFormation parameter, which is the only way a one-click deploy
+  # can arrive with email already configured.
+  #
+  # It lives here rather than in cognito.yaml because the record belongs to this
+  # stack's ConfigTable, and CognitoStack is created before StorageStack.
+  #
+  # The item shape below mirrors GovernanceRegistry.put_email_sender in
+  # backend/tools/aws/governance_store.py. deployment/check-resource-names.py
+  # asserts the two agree, because an inline CloudFormation function cannot import
+  # the module and a silent divergence would produce a record the app misreads.
+
+  EmailSenderSeedRole:
+    Type: AWS::IAM::Role
+    Condition: HasEmailSender
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SeedEmailSender
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # GetItem as well as PutItem: the function refuses to overwrite a
+              # sender an administrator has already configured.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource: !GetAtt ConfigTable.Arn
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt AuditTable.Arn
+              # The deploy-time sender change is vaulted like a console one. PutObject
+              # only: the bucket policy makes every key write-once and the object
+              # inherits the bucket's COMPLIANCE default retention (the floor).
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${AuditBucket.Arn}/*'
+              # Only the API task may change the audit vault switch. GetItem above
+              # still lets this function read it.
+              - Sid: DenyAuditSettingsWrite
+                Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt ConfigTable.Arn
+                Condition:
+                  'ForAnyValue:StringEquals':
+                    'dynamodb:LeadingKeys': [audit_settings]
+
+  EmailSenderSeedFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasEmailSender
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt EmailSenderSeedRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      # Cap concurrency (CKV_AWS_115 / W92) - one-shot custom resource.
+      ReservedConcurrentExecutions: 2
+      Environment:
+        Variables:
+          CONFIG_TABLE: !Ref ConfigTable
+          AUDIT_TABLE: !Ref AuditTable
+          AUDIT_BUCKET: !Ref AuditBucket
+          AUDIT_VAULT_DEFAULT: !Ref AuditVault
+          AUDIT_RETENTION_FLOOR: !Ref AuditRetentionDays
+      Code:
+        ZipFile: |
+          import base64
+          import hashlib
+          import json
+          import logging
+          import os
+          import urllib.request
+          import uuid
+          from datetime import datetime, timedelta, timezone
+          import boto3
+
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          ddb = boto3.resource('dynamodb')
+
+          # Must match governance_store._EMAIL_SENDER_KEY.
+          EMAIL_SENDER_KEY = 'email_sender'
+          ACTOR = 'cloudformation'
+          # Must match tools.aws.audit_log (SETTINGS_KEY, the action label, the
+          # vault key scheme and the record serialisation), so verify accepts
+          # this record like any other.
+          AUDIT_SETTINGS_KEY = 'audit_settings'
+          AUDIT_LABEL = 'Changed email sender'
+
+          def _now():
+              return datetime.now(timezone.utc).isoformat()
+
+          def _respond(event, context, status, data=None, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch logs: {context.log_group_name}/{context.log_stream_name}',
+                  'PhysicalResourceId': event.get('PhysicalResourceId') or context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {},
+              }).encode('utf-8')
+              req = urllib.request.Request(event['ResponseURL'], data=body, method='PUT',
+                                           headers={'Content-Type': '', 'Content-Length': str(len(body))})
+              with urllib.request.urlopen(req) as resp:
+                  log.info('CFN response: %s', resp.status)
+
+          def handler(event, context):
+              log.info('Event: %s', json.dumps({k: v for k, v in event.items() if k != 'ResponseURL'}))
+              try:
+                  if event['RequestType'] == 'Delete':
+                      # Leave the record alone. Deleting it would break invitations for
+                      # a deployment that is only being updated, and the table is Retain
+                      # anyway so the record outlives the stack by design.
+                      _respond(event, context, 'SUCCESS', {'Status': 'noop'})
+                      return
+
+                  props = event['ResourceProperties']
+                  address = (props.get('Address') or '').strip().lower()
+                  display = (props.get('Name') or '').strip()
+                  region = props.get('Region') or ''
+                  if not address:
+                      _respond(event, context, 'SUCCESS', {'Status': 'no-address'})
+                      return
+
+                  config = ddb.Table(os.environ['CONFIG_TABLE'])
+                  before = config.get_item(Key={'config_key': EMAIL_SENDER_KEY}).get('Item') or {}
+
+                  # An administrator may have configured a different sender through the
+                  # console since the last deploy. Their choice wins: this only fills an
+                  # empty record, so a stack update never silently redirects email.
+                  if before.get('from_address') and before.get('from_address') != address:
+                      log.info('Sender already configured as %s - leaving it alone',
+                               before['from_address'])
+                      _respond(event, context, 'SUCCESS', {
+                          'Status': 'preserved-existing',
+                          'FromAddress': before['from_address'],
+                      })
+                      return
+
+                  item = {
+                      'config_key': EMAIL_SENDER_KEY,
+                      'from_address': address,
+                      'from_name': display,
+                      'source_arn': '',
+                      'region': region,
+                      'updated_by': ACTOR,
+                      'updated_at': _now(),
+                      'configured': bool(address),
+                  }
+                  config.put_item(Item=item)
+                  log.info('Seeded email sender %s', address)
+
+                  # Same v2 audit event GovernanceRegistry.audit writes, so the
+                  # deploy-time change appears in the console's audit trail: the
+                  # vault object first (only while the vault switch is on, so a
+                  # trial stack deployed with AuditVault=off holds no locked object
+                  # and teardown can delete its empty bucket), then the index row.
+                  # Never fail the resource on an audit problem.
+                  try:
+                      fields = ('from_address', 'source_arn', 'region')
+                      now = datetime.now(timezone.utc)
+                      event_id = uuid.uuid4().hex
+                      switch = config.get_item(
+                          Key={'config_key': AUDIT_SETTINGS_KEY}).get('Item') or {}
+                      vault_on = switch.get('vault_enabled')
+                      if not isinstance(vault_on, bool):
+                          vault_on = os.environ.get('AUDIT_VAULT_DEFAULT', 'on') == 'on'
+                      record = {
+                          'v': 2,
+                          'event_id': event_id,
+                          'ts': now.isoformat(timespec='microseconds'),
+                          'actor_sub': ACTOR,
+                          'actor_email': '',
+                          'actor_role': 'system',
+                          'action': 'email_sender_set',
+                          'category': 'admin',
+                          'target_type': 'setting',
+                          'target_id': address,
+                          'target_label': address,
+                          'space_id': '',
+                          'space_name': '',
+                          'space_ids': [],
+                          'owner_admin': '',
+                          'on_other_owner': False,
+                          'before': {k: before.get(k, '') for k in fields},
+                          'after': {k: item.get(k, '') for k in fields},
+                          'request_id': '',
+                          'source_ip': '',
+                          'scope': 'account',
+                      }
+                      body = json.dumps(record, sort_keys=True, separators=(',', ':'),
+                                        default=str).encode()
+                      sha = hashlib.sha256(body)
+                      key = f'audit/{now:%Y/%m/%d}/{now:%Y%m%dT%H%M%S%f}Z-{event_id}.json'
+                      vault, version, retain_until = 'off', '', ''
+                      if vault_on:
+                          try:
+                              # No lock headers: the object gets the bucket default
+                              # (COMPLIANCE, the floor). IfNoneMatch satisfies the
+                              # bucket's write-once DenyOverwrite rule.
+                              resp = boto3.client('s3').put_object(
+                                  Bucket=os.environ.get('AUDIT_BUCKET', ''), Key=key,
+                                  Body=body, ContentType='application/json',
+                                  IfNoneMatch='*', ChecksumAlgorithm='SHA256',
+                                  ChecksumSHA256=base64.b64encode(sha.digest()).decode())
+                              vault = 'stored'
+                              version = (resp or {}).get('VersionId') or ''
+                              floor = int(os.environ.get('AUDIT_RETENTION_FLOOR') or 365)
+                              retain_until = (now + timedelta(days=floor)).isoformat(
+                                  timespec='microseconds')
+                          except Exception as e:
+                              vault = 'failed'
+                              log.warning('Audit vault write failed: %s', e)
+                      row = dict(record)
+                      row.update({
+                          'entity': 'account',
+                          'ts': f"{record['ts']}#{event_id[:8]}",
+                          'month': record['ts'][:7],
+                          'sha256': sha.hexdigest(),
+                          'vault': vault,
+                      })
+                      if vault == 'stored':
+                          row['s3_key'] = key
+                          row['s3_version_id'] = version
+                          row['retain_until'] = retain_until
+                      row['search'] = ' '.join(
+                          p for p in (ACTOR, AUDIT_LABEL, 'email_sender_set', address,
+                                      address) if p).lower()
+                      ddb.Table(os.environ['AUDIT_TABLE']).put_item(
+                          Item=row, ConditionExpression='attribute_not_exists(entity)')
+                  except Exception as e:
+                      log.warning('Audit write failed: %s', e)
+
+                  _respond(event, context, 'SUCCESS', {
+                      'Status': 'seeded', 'FromAddress': address,
+                  })
+              except Exception as e:
+                  log.exception('Email sender seed failed')
+                  _respond(event, context, 'FAILED', reason=str(e)[:1024])
+
+  EmailSenderSeed:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: HasEmailSender
+    Properties:
+      ServiceToken: !GetAtt EmailSenderSeedFunction.Arn
+      Address: !Ref EmailSenderAddress
+      Name: !Ref EmailSenderName
+      Region: !Ref 'AWS::Region'
+      # Re-run the seed whenever either value changes, so correcting a typo in the
+      # parameter actually reaches the record.
+      SenderVersion: !Sub '${EmailSenderAddress}|${EmailSenderName}'
+
+  UserKnowledgeTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-user-knowledge'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: user_sub
+          AttributeType: S
+        - AttributeName: space_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_sub
+          KeyType: HASH
+        - AttributeName: space_id
+          KeyType: RANGE
+
+  NetworkConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-network'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: connection_id
+          AttributeType: S
+        - AttributeName: db_vpc_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connection_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: vpc-index
+          KeySchema:
+            - AttributeName: db_vpc_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # ── The metrics store ────────────────────────────────────────────────────────
+  # Replaces the Aurora Serverless v2 store. Two tables plus CloudWatch custom metrics
+  # (published by the collectors, no resource to declare):
+  #   Tier1MetricsTable — one item per cluster member per Tier 1 run (every numeric the
+  #     collector measures plus the bloat and wait-event lists). PK instance_id, SK
+  #     '<member>#<scan_time>'. Short-lived: items carry `expires_at` (set from the
+  #     database's retention setting, default 30 days) and DynamoDB's TTL deletes them.
+  #     Not retained on delete: it is a rolling window, and the long-term series lives in
+  #     CloudWatch (15 months).
+  #   Tier2ScansTable — one `summary` item per deep scan plus one item per report
+  #     section. PK instance_id, SK '<section>#<scan_time>#<member>'. Kept for years;
+  #     Retain, like the registry. A sparse GSI on report_s3_key (summary items only)
+  #     answers "the scan behind this report".
+  # Neither table has a schema to upgrade: a new metric is a new attribute.
+
+  Tier1MetricsTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-tier1-metrics'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: instance_id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: instance_id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  Tier2ScansTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-tier2-scans'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: instance_id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: report_s3_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: instance_id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: by-report-key
+          KeySchema:
+            - AttributeName: report_s3_key
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  InvestigationsTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-investigations'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: investigation_id
+          AttributeType: S
+        - AttributeName: space_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: investigation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: space-index
+          KeySchema:
+            - AttributeName: space_id
+              KeyType: HASH
+            - AttributeName: investigation_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  RecommendationsTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-recommendations'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: recommendation_id
+          AttributeType: S
+        - AttributeName: instance_id
+          AttributeType: S
+        - AttributeName: space_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: recommendation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: instance-index
+          KeySchema:
+            - AttributeName: instance_id
+              KeyType: HASH
+            - AttributeName: recommendation_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: space-index
+          KeySchema:
+            - AttributeName: space_id
+              KeyType: HASH
+            - AttributeName: recommendation_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # Chat-session index for the operator app's Recents. AgentCore Memory has no
+  # list-sessions/title API, so we keep a per-user index here: PK actor_id
+  # (Cognito sub → natural per-user isolation), SK session_id (AgentCore runtime
+  # session id). Attributes: title, space_id, created_at, last_active. Upserted
+  # by the API (ECSTaskRole) on each chat turn; the streaming /invocations path
+  # is untouched. Same secure-by-default posture as the other tables.
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-sessions'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: actor_id
+          AttributeType: S
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: actor_id
+          KeyType: HASH
+        - AttributeName: session_id
+          KeyType: RANGE
+
+  # Per-caller rate-limit counters. One item per (caller, 60-second window),
+  # incremented atomically before a model-invoking request; TTL (expires_at) drops the
+  # window a couple of minutes after it closes so the table self-cleans. Ephemeral,
+  # non-authoritative fairness state — the limiter fails open if this table is
+  # unreachable, so nothing here is load-bearing for correctness. Same secure-by-default
+  # posture as the other tables.
+  RateLimitTable:
+    Type: AWS::DynamoDB::Table
+    DependsOn: InstancesTable   # see "First table" above
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-rate-limits'
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-reports-${AWS::AccountId}-${AWS::Region}'
+      # Block all public access (clears CKV_AWS_53/54/55/56).
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # At-rest encryption with SSE-S3 (clears CKV_AWS_21 / W41).
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # Versioning protects reports from accidental overwrite/delete (CKV_AWS_21).
+      VersioningConfiguration:
+        Status: Enabled
+      # S3 server-access logging (CKV_AWS_18 / W35) → central log bucket.
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: s3-access/reports/
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldReports
+            Status: Enabled
+            ExpirationInDays: 365
+
+  # Deny anything that did not arrive over TLS (AwsSolutions-S10). These objects
+  # are the generated analysis reports — schema details, query text and findings
+  # about the customer's databases — so it counts most here.
+  ReportsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ReportsBucket.Arn
+              - !Sub '${ReportsBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # ── Immutable admin audit vault ──
+  # The RECORD of every privileged admin action while the vault switch is on
+  # (DynamoDB <prefix>-audit is only the search index). One JSON object per event.
+  # AuditBucketPolicy makes every key write-once (S3 conditional writes), and Object
+  # Lock COMPLIANCE makes each object undeletable and unmodifiable until its
+  # retain-until date, including for the account root user. Application roles hold
+  # no delete, lock-configuration or bypass verbs (api.yaml, backend/template.yaml).
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Stack-unique, so a redeploy after `make destroy` gets a fresh bucket and never
+      # collides with a retained, still-locked one. Suffix = the last 12 hex digits of
+      # this nested stack's id, fixed for the stack's lifetime.
+      # Max length 21 + 7 + 12 + 1 + 12 = 53 (S3 limit 63).
+      BucketName: !Sub
+        - '${ResourcePrefix}-audit-${AWS::AccountId}-${Suffix}'
+        - Suffix: !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref 'AWS::StackId']]]]
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: COMPLIANCE
+            Days: !Ref AuditRetentionDays
+      VersioningConfiguration:        # required by Object Lock; explicit for visibility
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogBucket
+        LogFilePrefix: s3-access/audit/
+      LifecycleConfiguration:
+        Rules:
+          # After the floor retention: hide the current version behind a delete marker
+          # (allowed while locked), then remove the noncurrent version once its own lock
+          # has expired. S3 lifecycle never removes a locked version; it re-evaluates daily.
+          - Id: ExpireAfterRetention
+            Status: Enabled
+            ExpirationInDays: !Ref AuditRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: CleanExpiredDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+          - Id: AbortIncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Purpose
+          Value: admin-audit-vault
+
+  # Retained with the bucket: a bucket that outlives `make destroy` keeps its
+  # write-once and TLS-only rules. Removed together with the bucket once it is empty
+  # (delete-bucket on an empty bucket takes its policy with it).
+  AuditBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref AuditBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AuditBucket.Arn
+              - !Sub '${AuditBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+          # Write-once keys. A PutObject without If-None-Match: * is refused, so nothing
+          # (a compromised task included) can add a forged version under an existing key.
+          - Sid: DenyOverwrite
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:PutObject'
+            Resource: !Sub '${AuditBucket.Arn}/*'
+            Condition:
+              'Null':
+                's3:if-none-match': 'true'
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ResourcePrefix}-alerts'
+      DisplayName: DB Optimization Alerts
+      # Encrypt at rest with the AWS-managed SNS key (CKV_AWS_26 / W47). Same-
+      # account publishers (agent runtime role, batch role) that hold sns:Publish
+      # can publish to an SSE topic backed by alias/aws/sns without extra KMS
+      # grants, so this does not break critical-finding notifications.
+      KmsMasterKeyId: alias/aws/sns
+
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+Outputs:
+  InstancesTableArn:
+    Value: !GetAtt InstancesTable.Arn
+  SpacesTableArn:
+    Value: !GetAtt SpacesTable.Arn
+  SpacesTableName:
+    Value: !Ref SpacesTable
+  NetworkConnectionsTableArn:
+    Value: !GetAtt NetworkConnectionsTable.Arn
+  NetworkConnectionsTableName:
+    Value: !Ref NetworkConnectionsTable
+  InvestigationsTableArn:
+    Value: !GetAtt InvestigationsTable.Arn
+  InvestigationsTableName:
+    Value: !Ref InvestigationsTable
+  Tier1MetricsTableArn:
+    Value: !GetAtt Tier1MetricsTable.Arn
+  Tier1MetricsTableName:
+    Value: !Ref Tier1MetricsTable
+  Tier2ScansTableArn:
+    Value: !GetAtt Tier2ScansTable.Arn
+  Tier2ScansTableName:
+    Value: !Ref Tier2ScansTable
+  RecommendationsTableArn:
+    Value: !GetAtt RecommendationsTable.Arn
+  RecommendationsTableName:
+    Value: !Ref RecommendationsTable
+  SessionsTableArn:
+    Value: !GetAtt SessionsTable.Arn
+  SessionsTableName:
+    Value: !Ref SessionsTable
+  ReportsBucketArn:
+    Value: !GetAtt ReportsBucket.Arn
+  ReportsBucketName:
+    Value: !Ref ReportsBucket
+  AuditBucketName:
+    Description: Admin audit vault bucket (Object Lock COMPLIANCE; outlives the stack)
+    Value: !Ref AuditBucket
+  AuditBucketArn:
+    Value: !GetAtt AuditBucket.Arn
+  LogBucketName:
+    Description: Central log-archive bucket name (for ALB/S3 access logs)
+    Value: !Ref LogBucket
+  LogBucketArn:
+    Value: !GetAtt LogBucket.Arn
+  NotificationTopicArn:
+    Value: !Ref NotificationTopic

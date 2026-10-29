@@ -1,0 +1,333 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 + CloudFront for DB Optimization Dashboard frontend
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, Aurora cluster identifiers and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  EnableWAF:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Attach an AWS WAFv2 WebACL (AWS managed baseline rules + per-IP rate limiting)
+      to this CloudFront distribution. Default 'true', matching master.yaml: this
+      distribution is one of only two public entry points, so it is protected unless
+      you opt out. Set 'false' if your own org-level WAF already fronts it, or to
+      avoid the cost. On a full deploy master always passes its own value, so this
+      default only takes effect when deploying this template standalone.
+  WebAclArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of a CLOUDFRONT-scope WebACL to attach, created outside this stack. The main
+      stack passes this ONLY when the deployment Region is not us-east-1: a CLOUDFRONT
+      WebACL can only be created through the us-east-1 control plane, so a non-us-east-1
+      deploy creates it in a small us-east-1 edge stack (infrastructure/edge-waf.yaml)
+      and passes the ARN here. In us-east-1 this stays empty and the WebACL below is
+      created inline instead. Empty with EnableWAF=false means no WAF.
+
+Conditions:
+  # A CLOUDFRONT-scope WebACL can only be created in us-east-1 (AWS::WAFv2::WebACL, Scope),
+  # so this stack creates one inline ONLY in us-east-1. In any other Region the main stack
+  # supplies one via WebAclArn (built by the us-east-1 edge stack); see edge-waf.yaml.
+  WafEnabled: !And
+    - !Equals [!Ref EnableWAF, 'true']
+    - !Equals [!Ref 'AWS::Region', 'us-east-1']
+  # A WebACL built elsewhere (the us-east-1 edge stack) was passed in — used in any
+  # Region other than us-east-1 when WAF is on.
+  ExternalWaf: !Not [!Equals [!Ref WebAclArn, '']]
+
+Resources:
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-frontend-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+          # Deny anything that did not arrive over TLS (AwsSolutions-S10): S3
+          # accepts plain HTTP unless a policy refuses it.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt FrontendBucket.Arn
+              - !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ResourcePrefix}-frontend-oac-${AWS::AccountId}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront access-log bucket (CKV_AWS_86 / W10). ACLs enabled (ObjectWriter)
+  # for the awslogsdelivery account grant; account-scoped, not public, so all
+  # four block-public-access flags remain on.
+  FrontendLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-frontend-logs-${AWS::AccountId}-${AWS::Region}'
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # Access logs record who used the application and when, so they get the same
+  # in-transit protection as the assets.
+  FrontendLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt FrontendLogBucket.Arn
+              - !Sub '${FrontendLogBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # Optional AWS WAFv2 WebACL (CLOUDFRONT scope — must be us-east-1, which this
+  # stack is). AWS managed baseline rule groups + a per-IP rate limit. Only
+  # created when EnableWAF=true. CloudFront sees real client IPs, so rate-based
+  # and IP-reputation rules are effective here (unlike the internal ALB).
+  FrontendWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: WafEnabled
+    Properties:
+      Name: !Sub '${ResourcePrefix}-dashboard-${AWS::AccountId}'
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ResourcePrefix}-dashboard-waf'
+      Rules:
+        - Name: AWS-CommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: common-rule-set
+        - Name: AWS-KnownBadInputs
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: known-bad-inputs
+        - Name: AWS-IpReputation
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: ip-reputation
+        - Name: RateLimitPerIP
+          Priority: 4
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-limit
+
+  # Security response headers, including a Content-Security-Policy.
+  #
+  # The CSP is the real mitigation for token theft from this origin. The session
+  # tokens live in localStorage, so any script executing here can read them, which
+  # makes script injection the precondition for stealing them. Blocking untrusted
+  # script execution addresses that precondition, which is worth more than
+  # relocating the tokens:
+  # moving them to httpOnly cookies would need a server-side session layer and CSRF
+  # protection, and would not help against anything else.
+  #
+  # script-src can be 'self' with no hashes or nonces because the built bundle emits
+  # no inline <script> — every script is an external asset (verified against
+  # frontend/dist/index.html) — and neither app uses eval or new Function.
+  #
+  # 'unsafe-inline' appears for style-src only. React style={{...}} attributes and
+  # Tailwind's injected rules need it, and injected CSS is a far smaller problem than
+  # injected script.
+  #
+  # connect-src uses wildcards rather than the real API and Cognito hostnames because
+  # this stack is created BEFORE the API stack (master.yaml has APIStack DependsOn
+  # FrontendStack), so those values do not exist yet and referencing them would be a
+  # circular dependency. A custom Cognito domain would have to be added here.
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${ResourcePrefix}-frontend-security-headers'
+        Comment: Security headers and CSP for the DBOps Agent dashboard
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: !Sub >-
+              default-src 'self';
+              script-src 'self';
+              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+              font-src 'self' https://fonts.gstatic.com;
+              img-src 'self' data:;
+              connect-src 'self' https://*.execute-api.${AWS::Region}.amazonaws.com
+              https://*.auth.${AWS::Region}.amazoncognito.com
+              https://cognito-idp.${AWS::Region}.amazonaws.com
+              https://bedrock-agentcore.${AWS::Region}.amazonaws.com;
+              object-src 'none';
+              base-uri 'self';
+              frame-ancestors 'none';
+              form-action 'self' https://*.auth.${AWS::Region}.amazoncognito.com
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            Override: true
+            FrameOption: DENY
+          ReferrerPolicy:
+            Override: true
+            ReferrerPolicy: strict-origin-when-cross-origin
+          StrictTransportSecurity:
+            Override: true
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+          XSSProtection:
+            Override: true
+            Protection: true
+            ModeBlock: true
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        WebACLId: !If
+          - WafEnabled
+          - !GetAtt FrontendWebACL.Arn
+          - !If [ExternalWaf, !Ref WebAclArn, !Ref 'AWS::NoValue']
+        Logging:
+          Bucket: !GetAtt FrontendLogBucket.RegionalDomainName
+          Prefix: cloudfront/
+          IncludeCookies: false
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  FrontendBucketName:
+    Description: S3 bucket for frontend files
+    Value: !Ref FrontendBucket
+
+  CloudFrontDomainName:
+    Description: CloudFront distribution domain
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref CloudFrontDistribution
+
+  FrontendUrl:
+    Description: Frontend URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'

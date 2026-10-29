@@ -1,0 +1,59 @@
+Payments
+Owner: alice@example.com
+Overview
+Audit log
+Active
+DBOps Agent (Beta) can discover and monitor the databases in this Agent Space.
+Topology generated <date>
+1 database
+1
+reachable
+metadata refreshed for 1 of 1
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+1 onboarded · 2 found, not onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+Operators
+2 operators have access
+Topology
+Map generated <date>
+Audit log
+Every admin action on this space, newest first. Vault on: new records are locked for 365 days.
+24 h
+7 d
+30 d
+90 d
+All
+Custom
+All actions
+Created space
+Changed space details
+Deleted space
+Finished deleting space
+Validated account access
+Ran discovery
+Dismissed discovered database
+Onboarded database
+Removed database from space
+Finished removing database
+Database removal incomplete
+Detected cluster failover
+Repaired cross-Region host routes
+Added operator
+Removed operator
+Switched audit vault
+1 event
+DETAILS
+TIME WHO ACTION TARGET VAULT
+<date>
+super@example.com
+Super admin
+On another admin's space
+Ran discovery
+space_discover
+Payments
+In vault

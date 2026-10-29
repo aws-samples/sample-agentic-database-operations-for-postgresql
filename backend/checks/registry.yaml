@@ -1,0 +1,1254 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Check registry — the router/workflow catalog. Keyed by a human SLUG (the
+# primary identity used by the router, skills, and tools). `catalog_id` (e.g.
+# CHK-NNN) is a stable traceability id for following a check across revisions —
+# it is NEVER surfaced to users (use `display_name`). Thresholds live in
+# references.yaml (see `thresholds_ref`); SQL lives in the tool. Add a check =
+# add an entry here + its skill/SOP (no router code change).
+
+checks:
+  vacuum-and-bloat:
+    display_name: "Table Bloat & Autovacuum"
+    catalog_id: CHK-007
+    category: "MAINTENANCE & HEALTH"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (+ Extended Support 11/12), Aurora Serverless v2; self-managed 9.4+"
+    # Symptom vocabulary for the deterministic router (keyword match; embeddings later).
+    triggers:
+      - bloat
+      - table bloat
+      - dead tuple
+      - dead tuples
+      - autovacuum
+      - vacuum
+      - vacuum full
+      - pg_repack
+      - storage growing
+      - storage keeps growing
+      - keeps growing
+      - table growing
+      - disk growing
+      - reclaim space
+      - wasted space
+    skill: vacuum-and-bloat
+    # test_tools: granular tool list for the golden-harness / test-scoping ONLY. NOT a runtime
+    # fence. The skill's SKILL.md `allowed-tools` frontmatter is advisory too (skill-authoring
+    # guidance); it is stripped from the injected skill body and no runtime code reads it. The
+    # actual bound on what an agent may call is the fixed tool set each agent is constructed with
+    # per surface (chat vs investigation), and every one of those tools is read-only. Informational.
+    test_tools:
+      - get_vacuum_stats_health
+      - get_db_configuration
+      - get_current_activity
+      - get_lock_analysis
+      - get_insert_autovacuum_lag
+      - get_historical_metrics
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#vacuum-and-bloat"
+    temporal_default: conjunction
+    # Recommended run cadence for this check.
+    # GUIDANCE/default only — a sensible scan cadence + a hint the agent can weigh;
+    # NOT a hard restriction. CHK-007 is a point-in-time state check, so this is a
+    # frequency, not a lookback window. Aligns with the Tier-2 "Daily" default.
+    recommended_frequency: "daily; hourly for known high-write workloads"
+
+  xid-wraparound-database:
+    display_name: "Transaction ID Wraparound (Database)"
+    catalog_id: CHK-001
+    category: "MAINTENANCE & HEALTH"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (+ Extended Support 11/12), Aurora Serverless v2; self-managed 8.0+"
+    triggers:
+      - xid
+      - xid age
+      - transaction id age
+      - wraparound
+      - transaction id wraparound
+      - datfrozenxid
+      - freeze
+      - vacuum to prevent wraparound
+      - maximumusedtransactionids
+      - read-only shutdown
+    skill: transaction-wraparound
+    # Shared with xid-wraparound-table (same tool); scoped superset for the investigation.
+    test_tools:
+      - get_maintenance_status
+      - get_current_activity
+      - get_db_configuration
+      - get_historical_metrics
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#xid-wraparound-database"
+    temporal_default: live
+    recommended_frequency: "daily (minimum); hourly for high-write workloads"
+    investigation_lookback: "30 days (Period=5min) for MaximumUsedTransactionIDs trend"
+    alert_window: "last 1 hour"
+
+  xid-wraparound-table:
+    display_name: "Transaction ID Wraparound (Table)"
+    catalog_id: CHK-002
+    category: "MAINTENANCE & HEALTH"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (+ Extended Support 11/12), Aurora Serverless v2; self-managed 8.0+"
+    triggers:
+      - relfrozenxid
+      - table xid age
+      - per-table wraparound
+      - freeze_pct
+      - table freeze
+      - which table wraparound
+    skill: transaction-wraparound
+    test_tools:
+      - get_maintenance_status
+      - get_current_activity
+      - get_vacuum_stats_health
+      - get_db_configuration
+    thresholds_ref: "checks/references.yaml#xid-wraparound-table"
+    temporal_default: live
+    # Guidance only, not a hard limit; escalate cadence when the database-level check is elevated.
+    recommended_frequency: "weekly routine; daily when the database-level wraparound check is WARNING/CRITICAL"
+    investigation_lookback: "30 days (Period=5min)"
+    alert_window: "last 1 hour"
+
+  invalid-indexes:
+    display_name: "Invalid / Orphaned Indexes"
+    catalog_id: CHK-003
+    category: "MAINTENANCE & HEALTH"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (+ Extended Support 11/12), Aurora Serverless v2; self-managed 8.2+"
+    triggers:
+      - invalid index
+      - invalid indexes
+      - orphaned index
+      - index not ready
+      - not ready index
+      - reindex
+      - failed create index concurrently
+      - create index concurrently
+    skill: invalid-indexes
+    test_tools:
+      - get_maintenance_status
+      - get_current_activity
+      - get_storage_analysis
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#invalid-indexes"
+    temporal_default: live
+    recommended_frequency: "weekly; after every deployment/release; after failover/crash recovery; after CREATE INDEX CONCURRENTLY"
+    investigation_lookback: "90 days (CloudTrail deployment/failover events)"
+    alert_window: "on demand / post-deploy"
+
+  sequence-exhaustion:
+    display_name: "Sequence Exhaustion"
+    catalog_id: CHK-004
+    category: "MAINTENANCE & HEALTH"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 10+ (pg_sequences view); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - sequence exhaustion
+      - sequence
+      - nextval
+      - reached maximum value of sequence
+      - sequence near max
+      - int4 sequence
+      - serial exhausted
+      - identity column exhausted
+    skill: sequence-exhaustion
+    test_tools:
+      - get_sequence_exhaustion
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#sequence-exhaustion"
+    temporal_default: live
+    recommended_frequency: "weekly; daily for high-write tables with int4 (integer) sequences"
+    investigation_lookback: "30 days (sequence-exhaustion error log)"
+    alert_window: "last 1 hour"
+
+  unvalidated-constraints:
+    display_name: "Unvalidated Constraints"
+    catalog_id: CHK-005
+    category: "MAINTENANCE & HEALTH"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 9.1+ (NOT VALID); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - unvalidated constraint
+      - not valid constraint
+      - not valid
+      - validate constraint
+      - unvalidated foreign key
+      - constraint never validated
+      - incomplete migration
+    skill: unvalidated-constraints
+    test_tools:
+      - get_constraint_validation
+    thresholds_ref: "checks/references.yaml#unvalidated-constraints"
+    temporal_default: live
+    recommended_frequency: "weekly; after every migration/deployment that adds constraints"
+    investigation_lookback: "90 days (migration/deployment events)"
+    alert_window: "on demand / post-migration"
+
+  materialized-view-freshness:
+    display_name: "Materialized View Freshness"
+    catalog_id: CHK-006
+    category: "MAINTENANCE & HEALTH"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 9.3+ (materialized views); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - materialized view
+      - matview
+      - refresh materialized view
+      - stale materialized view
+      - unpopulated matview
+      - view serving outdated data
+    skill: materialized-view-freshness
+    test_tools:
+      - get_materialized_view_freshness
+      - get_current_activity
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#materialized-view-freshness"
+    temporal_default: live
+    recommended_frequency: "weekly"
+    investigation_lookback: "30 days (REFRESH log signal)"
+    alert_window: "on demand"
+
+  stale-statistics:
+    display_name: "Stale Table Statistics"
+    catalog_id: CHK-050
+    category: "MAINTENANCE & HEALTH"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 9.4+ (n_mod_since_analyze); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - stale statistics
+      - stale stats
+      - analyze overdue
+      - outdated planner statistics
+      - bad plan after bulk load
+      - planner choosing bad plan
+      - n_mod_since_analyze
+    skill: stale-statistics
+    test_tools:
+      - get_stale_statistics
+      - get_historical_metrics
+    thresholds_ref: "checks/references.yaml#stale-statistics"
+    temporal_default: live
+    recommended_frequency: "weekly; after bulk loads or migrations"
+    investigation_lookback: "3 days (write-throughput / load correlation)"
+    alert_window: "on demand / post-load"
+
+  index-usage-efficiency:
+    display_name: "Index Usage & Efficiency"
+    catalog_id: CHK-008
+    category: "OPTIMIZATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - unused index
+      - unused indexes
+      - rarely used index
+      - index cleanup
+      - which indexes can i drop
+      - drop index
+      - index write amplification
+    skill: index-hygiene
+    test_tools:
+      - get_index_statistics
+      - get_db_overview
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#index-usage-efficiency"
+    temporal_default: live
+    recommended_frequency: "weekly; after stats_reset allow 7+ days (ideally 30+) before acting"
+    investigation_lookback: "stats_reset age (usage is cumulative); 3 days for write-IO context"
+    alert_window: "on demand"
+
+  duplicate-indexes:
+    display_name: "Duplicate Indexes"
+    catalog_id: CHK-012
+    category: "OPTIMIZATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - duplicate index
+      - duplicate indexes
+      - redundant index
+      - redundant indexes
+      - identical indexes
+    skill: index-hygiene
+    test_tools:
+      - get_duplicate_indexes
+      - get_index_statistics
+    thresholds_ref: "checks/references.yaml#duplicate-indexes"
+    temporal_default: live
+    recommended_frequency: "monthly; after major deployments/migrations that create indexes"
+    investigation_lookback: "point-in-time (catalog state)"
+    alert_window: "on demand"
+
+  fk-without-index:
+    display_name: "Foreign Keys Without a Supporting Index"
+    catalog_id: CHK-016
+    category: "OPTIMIZATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - foreign key without index
+      - fk without index
+      - unindexed foreign key
+      - slow cascade delete
+      - slow join on foreign key
+    skill: missing-indexes
+    test_tools:
+      - get_fk_without_indexes
+      - get_lock_analysis
+    thresholds_ref: "checks/references.yaml#fk-without-index"
+    temporal_default: live
+    recommended_frequency: "monthly; after schema changes that add FK constraints"
+    investigation_lookback: "point-in-time (catalog state)"
+    alert_window: "on demand"
+
+  sequential-scan-tables:
+    display_name: "Sequential Scan Tables"
+    catalog_id: CHK-018
+    category: "OPTIMIZATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - sequential scan
+      - seq scan
+      - full table scan
+      - table scan heavy
+      - missing index seq scan
+    skill: missing-indexes
+    test_tools:
+      - get_sequential_scan_tables
+      - get_query_performance
+    thresholds_ref: "checks/references.yaml#sequential-scan-tables"
+    temporal_default: live
+    recommended_frequency: "weekly; after stats_reset allow 7+ days for meaningful scan accumulation"
+    investigation_lookback: "stats_reset age (cumulative); 3 days for read-IO context"
+    alert_window: "on demand"
+
+  oversized-datatypes:
+    display_name: "Oversized Data Types"
+    catalog_id: CHK-014
+    category: "OPTIMIZATION"
+    priority: low
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - oversized data type
+      - data type sizing
+      - column type optimization
+      - bigint vs integer
+      - unbounded numeric
+    skill: oversized-datatypes
+    test_tools:
+      - get_oversized_datatypes
+    thresholds_ref: "checks/references.yaml#oversized-datatypes"
+    temporal_default: live
+    recommended_frequency: "monthly; or during design reviews / migration planning"
+    investigation_lookback: "point-in-time (catalog state)"
+    alert_window: "on demand"
+
+  unused-tables:
+    display_name: "Unused Tables"
+    catalog_id: CHK-015
+    category: "OPTIMIZATION"
+    priority: low
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - unused table
+      - unused tables
+      - dead table
+      - archival candidate
+      - table nobody queries
+    skill: unused-tables
+    test_tools:
+      - get_unused_tables
+    thresholds_ref: "checks/references.yaml#unused-tables"
+    temporal_default: live
+    recommended_frequency: "monthly; ensure stats_reset_time > 30 days before reviewing"
+    investigation_lookback: "stats_reset age (cumulative)"
+    alert_window: "on demand"
+
+  trigger-inventory:
+    display_name: "Trigger Inventory"
+    catalog_id: CHK-017
+    category: "OPTIMIZATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - trigger
+      - triggers
+      - trigger inventory
+      - trigger overhead
+      - disabled trigger
+      - for each row trigger
+    skill: trigger-inventory
+    test_tools:
+      - get_trigger_analysis
+      - get_query_performance
+    thresholds_ref: "checks/references.yaml#trigger-inventory"
+    temporal_default: live
+    recommended_frequency: "monthly; after schema changes/deployments that may add triggers"
+    investigation_lookback: "point-in-time (catalog state)"
+    alert_window: "on demand"
+
+  toast-health:
+    display_name: "TOAST Health"
+    catalog_id: CHK-009
+    category: "OPTIMIZATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - toast
+      - toast bloat
+      - large text column slow
+      - jsonb column slow
+      - toast table
+    skill: toast-health
+    test_tools:
+      - get_toast_status
+      - get_vacuum_stats_health
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#toast-health"
+    temporal_default: live
+    recommended_frequency: "weekly; daily for tables with large text/jsonb/bytea columns"
+    investigation_lookback: "3 days (read-IO context)"
+    alert_window: "on demand"
+
+  unpartitioned-large-tables:
+    display_name: "Unpartitioned Large Tables"
+    catalog_id: CHK-010
+    category: "OPTIMIZATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 10+ (declarative partitioning); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - partitioning
+      - partition large table
+      - unpartitioned table
+      - very large table
+      - should i partition
+    skill: large-table-partitioning
+    test_tools:
+      - get_partitioning_analysis
+      - get_historical_metrics
+    thresholds_ref: "checks/references.yaml#unpartitioned-large-tables"
+    temporal_default: live
+    recommended_frequency: "monthly (table growth is gradual); weekly for fast-growing tables"
+    investigation_lookback: "growth trend"
+    alert_window: "on demand"
+
+  estimated-table-bloat:
+    display_name: "Estimated Table Bloat"
+    catalog_id: CHK-011
+    category: "OPTIMIZATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - table bloat
+      - estimated bloat
+      - wasted disk space
+      - reclaim on-disk space
+      - pg_repack
+      - vacuum full candidate
+    skill: table-bloat-estimate
+    test_tools:
+      - get_bloat_analysis
+      - get_vacuum_stats_health
+    thresholds_ref: "checks/references.yaml#estimated-table-bloat"
+    temporal_default: live
+    recommended_frequency: "safe to run broadly (no table scan); confirm hits with pgstattuple"
+    investigation_lookback: "point-in-time (estimate)"
+    alert_window: "on demand"
+
+  database-sizes:
+    display_name: "Database Sizes"
+    catalog_id: CHK-026
+    category: "DATA FOOTPRINT"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - database size
+      - database sizes
+      - storage growth
+      - running out of disk
+      - capacity planning
+    skill: storage-capacity
+    test_tools:
+      - get_storage_analysis
+      - observability_agent
+      - get_historical_metrics
+    thresholds_ref: "checks/references.yaml#database-sizes"
+    temporal_default: conjunction
+    recommended_frequency: "weekly for trending; daily during storage pressure"
+    investigation_lookback: "30 days (FreeStorageSpace / growth)"
+    alert_window: "last 1 hour"
+
+  largest-tables:
+    display_name: "Largest Tables"
+    catalog_id: CHK-027
+    category: "DATA FOOTPRINT"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - largest tables
+      - biggest tables
+      - table storage composition
+      - over-indexed table
+      - where is storage going
+    skill: storage-capacity
+    test_tools:
+      - get_storage_analysis
+      - get_vacuum_stats_health
+    thresholds_ref: "checks/references.yaml#largest-tables"
+    temporal_default: live
+    recommended_frequency: "weekly for trending; context for capacity investigations"
+    investigation_lookback: "point-in-time (composition)"
+    alert_window: "on demand"
+
+  wal-directory-size:
+    display_name: "WAL Directory Size"
+    catalog_id: CHK-028
+    category: "DATA FOOTPRINT"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - wal growing
+      - pg_wal filling up
+      - wal disk usage
+      - wal not recycled
+      - transaction logs disk usage
+    skill: wal-storage
+    test_tools:
+      - get_storage_analysis
+      - get_replication_status
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#wal-directory-size"
+    temporal_default: live
+    recommended_frequency: "daily; hourly if replication slots exist or WAL is accumulating"
+    investigation_lookback: "3 days (WAL disk usage)"
+    alert_window: "last 1 hour"
+
+  checkpoint-health:
+    display_name: "Checkpoint Health"
+    catalog_id: CHK-029
+    category: "DATA FOOTPRINT"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (PG17+ pg_stat_checkpointer), Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - checkpoint
+      - forced checkpoints
+      - checkpoint tuning
+      - max_wal_size
+      - io spikes on checkpoints
+    skill: checkpoint-bgwriter
+    test_tools:
+      - get_checkpoint_stats
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#checkpoint-health"
+    temporal_default: live
+    recommended_frequency: "daily; correlate with write workload pattern"
+    investigation_lookback: "3 days (write-IO context)"
+    alert_window: "last 1 hour"
+
+  bgwriter-efficiency:
+    display_name: "Background Writer Efficiency"
+    catalog_id: CHK-030
+    category: "DATA FOOTPRINT"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (PG17+ backend counters in pg_stat_io), Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - background writer
+      - bgwriter
+      - buffers_backend
+      - backends writing buffers
+      - write latency stalls
+    skill: checkpoint-bgwriter
+    test_tools:
+      - get_bgwriter_stats
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#bgwriter-efficiency"
+    temporal_default: live
+    recommended_frequency: "daily; correlate with write workload and checkpoint activity"
+    investigation_lookback: "3 days (write-IO context)"
+    alert_window: "last 1 hour"
+
+  per-table-cache-hit:
+    display_name: "Per-table Cache Hit Ratio"
+    catalog_id: CHK-019
+    category: "QUERY & I/O PERFORMANCE"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - cache hit ratio
+      - buffer cache
+      - low cache hit
+      - reads going to disk
+      - shared_buffers
+    skill: cache-hit-ratio
+    test_tools:
+      - get_io_statistics
+      - get_buffer_pool_stats
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#per-table-cache-hit"
+    temporal_default: live
+    recommended_frequency: "daily; hourly during performance investigations"
+    investigation_lookback: "3 days (read-IO context)"
+    alert_window: "last 15 min"
+
+  database-cache-hit:
+    display_name: "Database Cache Hit Ratio"
+    catalog_id: CHK-032
+    category: "QUERY & I/O PERFORMANCE"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - database cache hit
+      - overall cache hit ratio
+      - cache cold database
+      - buffer pool hit ratio
+    skill: cache-hit-ratio
+    test_tools:
+      - get_buffer_pool_stats
+      - get_io_statistics
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#database-cache-hit"
+    temporal_default: live
+    recommended_frequency: "daily; context for per-table cache-hit"
+    investigation_lookback: "3 days (memory/IO context)"
+    alert_window: "last 15 min"
+
+  transaction-health:
+    display_name: "Transaction Health / Rollbacks"
+    catalog_id: CHK-021
+    category: "QUERY & I/O PERFORMANCE"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - rollback rate
+      - high rollbacks
+      - aborted transactions
+      - commit rollback ratio
+      - transaction health
+    skill: transaction-health
+    test_tools:
+      - get_transaction_stats
+      - get_lock_analysis
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#transaction-health"
+    temporal_default: live
+    recommended_frequency: "daily; correlate with application error logs"
+    investigation_lookback: "30 days (XID context)"
+    alert_window: "last 1 hour"
+
+  long-lived-sessions:
+    display_name: "Long-lived Sessions"
+    catalog_id: CHK-024
+    category: "QUERY & I/O PERFORMANCE"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - long running session
+      - long-lived session
+      - connection leak
+      - old connections
+      - session open for hours
+    skill: long-lived-sessions
+    test_tools:
+      - get_session_duration_analysis
+      - get_current_activity
+    thresholds_ref: "checks/references.yaml#long-lived-sessions"
+    temporal_default: live
+    recommended_frequency: "daily; correlate with idle connections"
+    investigation_lookback: "point-in-time (live sessions)"
+    alert_window: "last 15 min"
+
+  top-expensive-queries:
+    display_name: "Top Expensive Queries"
+    catalog_id: CHK-020
+    category: "QUERY & I/O PERFORMANCE"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (PG13+ *_exec_time; PG11-12 *_time; fallback if no pg_stat_statements), Aurora Serverless v2"
+    triggers:
+      - slow query
+      - slow queries
+      - expensive query
+      - top queries
+      - high database load
+      - query performance
+    skill: query-performance
+    test_tools:
+      - get_query_performance
+      - get_temp_file_queries
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#top-expensive-queries"
+    temporal_default: live
+    recommended_frequency: "daily; hourly during performance investigations"
+    investigation_lookback: "point-in-time (cumulative pg_stat_statements)"
+    alert_window: "last 15 min"
+
+  function-performance:
+    display_name: "Function Performance"
+    catalog_id: CHK-022
+    category: "QUERY & I/O PERFORMANCE"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - function performance
+      - slow function
+      - stored procedure performance
+      - expensive function
+    skill: query-performance
+    test_tools:
+      - get_function_performance
+    thresholds_ref: "checks/references.yaml#function-performance"
+    temporal_default: live
+    recommended_frequency: "weekly; daily during performance investigations"
+    investigation_lookback: "point-in-time (cumulative)"
+    alert_window: "on demand"
+
+  wait-events:
+    display_name: "Wait Events"
+    catalog_id: CHK-023
+    category: "QUERY & I/O PERFORMANCE"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.6+"
+    triggers:
+      - wait event
+      - wait events
+      - what is the database waiting on
+      - live slowdown
+      - bottleneck now
+    skill: wait-events
+    test_tools:
+      - get_wait_event_analysis
+      - get_lock_analysis
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#wait-events"
+    temporal_default: live
+    recommended_frequency: "hourly; every 5 minutes during performance incidents"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "last 5 min"
+
+  temp-file-spills:
+    display_name: "Temp-file Spills"
+    catalog_id: CHK-025
+    category: "QUERY & I/O PERFORMANCE"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (PG13+ mean_exec_time; PG11-12 mean_time), Aurora Serverless v2"
+    triggers:
+      - temp file
+      - temp spill
+      - spilling to disk
+      - work_mem
+      - sort spill to disk
+    skill: query-performance
+    test_tools:
+      - get_temp_file_queries
+      - get_query_performance
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#temp-file-spills"
+    temporal_default: live
+    recommended_frequency: "weekly; daily during performance investigations"
+    investigation_lookback: "point-in-time (cumulative)"
+    alert_window: "last 15 min"
+
+  lock-contention:
+    display_name: "Lock Contention"
+    catalog_id: CHK-033
+    category: "QUERY & I/O PERFORMANCE"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - lock contention
+      - blocked queries
+      - blocking chain
+      - deadlock
+      - queries stuck
+      - lock wait
+    skill: lock-contention
+    test_tools:
+      - get_lock_analysis
+      - get_wait_event_analysis
+      - get_current_activity
+    thresholds_ref: "checks/references.yaml#lock-contention"
+    temporal_default: live
+    recommended_frequency: "hourly; every 5 minutes during incidents"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "last 5 min"
+
+  replication-health:
+    display_name: "Replication Health"
+    catalog_id: CHK-034
+    category: "REPLICATION STATUS"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+ (Aurora readers via AuroraReplicaLag)"
+    triggers:
+      - replication lag
+      - replica lag
+      - standby falling behind
+      - replication slot lag
+      - inactive slot
+      - is replication healthy
+    skill: replication-health
+    test_tools:
+      - get_replication_status
+      - get_storage_analysis
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#replication-health"
+    temporal_default: live
+    recommended_frequency: "hourly; every 5 minutes if replication issues suspected"
+    investigation_lookback: "3 days (replica-lag context)"
+    alert_window: "last 5 min"
+
+  wal-configuration:
+    display_name: "WAL Configuration"
+    catalog_id: CHK-035
+    category: "REPLICATION STATUS"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18 (PG13+ wal_keep_size; PG<13 wal_keep_segments), Aurora Serverless v2"
+    triggers:
+      - wal level
+      - wal configuration
+      - wal sender
+      - archive_mode
+      - replication config
+    skill: replication-health
+    test_tools:
+      - get_wal_status
+      - get_replication_status
+    thresholds_ref: "checks/references.yaml#wal-configuration"
+    temporal_default: live
+    recommended_frequency: "daily; after parameter changes or replica add/remove"
+    investigation_lookback: "7 days (replication events)"
+    alert_window: "on demand"
+
+  logical-replication-health:
+    display_name: "Logical Replication Health"
+    catalog_id: CHK-036
+    category: "REPLICATION STATUS"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 10+ (logical replication); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - logical replication
+      - cdc
+      - dms
+      - publication
+      - subscription
+      - logical slot
+      - disabled subscription
+    skill: logical-replication
+    test_tools:
+      - get_logical_replication
+      - get_storage_analysis
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#logical-replication-health"
+    temporal_default: live
+    recommended_frequency: "hourly; every 5 minutes if CDC/DMS active and lag suspected"
+    investigation_lookback: "3 days (WAL/slot context)"
+    alert_window: "last 5 min"
+
+  idle-connections:
+    display_name: "Idle Connections"
+    catalog_id: CHK-013
+    category: "CURRENT ACTIVITIES"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - idle connections
+      - idle sessions
+      - connections wasting slots
+      - too many idle
+    skill: connection-health
+    test_tools:
+      - get_idle_connections
+      - get_current_activity
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#idle-connections"
+    temporal_default: live
+    recommended_frequency: "daily; hourly during peak if connection exhaustion is a risk"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "last 15 min"
+
+  connection-pooling-efficiency:
+    display_name: "Connection Pooling Efficiency"
+    catalog_id: CHK-031
+    category: "CURRENT ACTIVITIES"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - connection pooling
+      - pooling efficiency
+      - connection churn
+      - pgbouncer
+      - rds proxy
+      - pool oversized
+    skill: connection-health
+    test_tools:
+      - get_connection_pooling_efficiency
+      - get_idle_connections
+    thresholds_ref: "checks/references.yaml#connection-pooling-efficiency"
+    temporal_default: live
+    recommended_frequency: "daily; during peak to assess pool sizing"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "on demand"
+
+  current-activity-snapshot:
+    display_name: "Current Activity Snapshot"
+    catalog_id: CHK-037
+    category: "CURRENT ACTIVITIES"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - current activity
+      - what is happening now
+      - connection utilization
+      - idle in transaction
+      - active sessions
+      - connection exhaustion
+    skill: connection-health
+    test_tools:
+      - get_current_activity
+      - get_lock_analysis
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#current-activity-snapshot"
+    temporal_default: live
+    recommended_frequency: "every 5 minutes (lightweight - safe to run frequently)"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "last 5 min"
+
+  long-running-transactions:
+    display_name: "Long-Running Transactions"
+    catalog_id: CHK-049
+    category: "CURRENT ACTIVITIES"
+    priority: critical
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - long running transaction
+      - long-running transaction
+      - vacuum blocked
+      - oldest xmin
+      - snapshot held
+      - transaction open too long
+    skill: long-running-transactions
+    test_tools:
+      - get_current_activity
+      - get_replication_status
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#long-running-transactions"
+    temporal_default: live
+    recommended_frequency: "every 5 minutes (lightweight); every 30 seconds during XID age climb"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "last 5 min"
+
+  connection-characterization:
+    display_name: "Connection Characterization"
+    catalog_id: CHK-038
+    category: "CURRENT ACTIVITIES"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - connection characterization
+      - who is connecting
+      - top applications
+      - connection churn
+      - single client dominating
+      - pooling detection
+    skill: connection-health
+    test_tools:
+      - get_connection_analysis
+      - get_idle_connections
+    thresholds_ref: "checks/references.yaml#connection-characterization"
+    temporal_default: live
+    recommended_frequency: "daily; during peak for pool sizing validation"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "on demand"
+
+  workload-mix:
+    display_name: "Workload Mix"
+    catalog_id: CHK-039
+    category: "CURRENT ACTIVITIES"
+    priority: low
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - workload mix
+      - read heavy or write heavy
+      - ddl during peak
+      - bulk copy load
+      - query type breakdown
+    skill: workload-characterization
+    test_tools:
+      - get_workload_characterization
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#workload-mix"
+    temporal_default: live
+    recommended_frequency: "hourly; useful for workload trending; during incidents"
+    investigation_lookback: "point-in-time (live)"
+    alert_window: "on demand"
+
+  workload-pattern:
+    display_name: "Workload Pattern"
+    catalog_id: CHK-040
+    category: "CURRENT ACTIVITIES"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - workload pattern
+      - workload profile
+      - read-heavy write-heavy classification
+      - long term workload
+    skill: workload-characterization
+    test_tools:
+      - get_workload_profile
+      - get_transaction_stats
+    thresholds_ref: "checks/references.yaml#workload-pattern"
+    temporal_default: conjunction
+    recommended_frequency: "weekly (cumulative stats change slowly); or for workload profiling"
+    investigation_lookback: "stats_reset age (cumulative)"
+    alert_window: "on demand"
+
+  system-parameter-audit:
+    display_name: "System Parameter Audit"
+    catalog_id: CHK-041
+    category: "SYSTEM CONFIGURATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - parameter audit
+      - config audit
+      - is the database configured safely
+      - tuning review
+      - postgresql settings
+    skill: system-parameters
+    test_tools:
+      - get_db_configuration
+      - get_setting_overrides
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#system-parameter-audit"
+    temporal_default: live
+    recommended_frequency: "weekly; after parameter group changes; during onboarding/initial assessment"
+    investigation_lookback: "30 days (parameter-change events)"
+    alert_window: "on demand"
+
+  role-audit:
+    display_name: "Database Role Audit"
+    catalog_id: CHK-042
+    category: "SYSTEM CONFIGURATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - role audit
+      - superuser
+      - database roles
+      - bypass rls
+      - expired password
+      - privilege escalation
+    skill: security-audit
+    test_tools:
+      - get_security_audit
+    thresholds_ref: "checks/references.yaml#role-audit"
+    temporal_default: live
+    recommended_frequency: "monthly; after user/role provisioning changes; during security audits"
+    investigation_lookback: "90 days (role/grant events)"
+    alert_window: "on demand"
+
+  schema-privilege-audit:
+    display_name: "Schema & Table Privilege Audit"
+    catalog_id: CHK-043
+    category: "SYSTEM CONFIGURATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - privilege audit
+      - who can access
+      - table grants
+      - public role access
+      - schema permissions
+    skill: security-audit
+    test_tools:
+      - get_security_audit
+    thresholds_ref: "checks/references.yaml#schema-privilege-audit"
+    temporal_default: live
+    recommended_frequency: "monthly; after GRANT/REVOKE changes; during security audits"
+    investigation_lookback: "point-in-time (catalog)"
+    alert_window: "on demand"
+
+  connection-encryption:
+    display_name: "Connection Encryption (SSL/TLS)"
+    catalog_id: CHK-044
+    category: "SYSTEM CONFIGURATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - ssl
+      - tls
+      - encrypted connections
+      - unencrypted connection
+      - force_ssl
+    skill: security-audit
+    test_tools:
+      - get_security_audit
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#connection-encryption"
+    temporal_default: live
+    recommended_frequency: "daily; after client/application changes; during security audits"
+    investigation_lookback: "point-in-time (live sessions)"
+    alert_window: "last 15 min"
+
+  row-level-security:
+    display_name: "Row-Level Security Status"
+    catalog_id: CHK-045
+    category: "SYSTEM CONFIGURATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "PG 9.5+ (RLS); RDS/Aurora PG 11-18, Aurora Serverless v2"
+    triggers:
+      - row level security
+      - rls
+      - rls policy
+      - tenant isolation
+      - multi-tenant security
+    skill: security-audit
+    test_tools:
+      - get_security_audit
+    thresholds_ref: "checks/references.yaml#row-level-security"
+    temporal_default: live
+    recommended_frequency: "monthly; after schema changes; during security audits"
+    investigation_lookback: "point-in-time (catalog)"
+    alert_window: "on demand"
+
+  audit-logging-config:
+    display_name: "Audit Logging Configuration"
+    catalog_id: CHK-046
+    category: "SYSTEM CONFIGURATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - audit logging
+      - pgaudit
+      - compliance logging
+      - log_statement
+      - audit trail
+    skill: security-audit
+    test_tools:
+      - get_security_audit
+      - get_extension_inventory
+      - observability_agent
+    thresholds_ref: "checks/references.yaml#audit-logging-config"
+    temporal_default: live
+    recommended_frequency: "weekly; after parameter changes; during compliance audits"
+    investigation_lookback: "7 days (AUDIT log entries)"
+    alert_window: "on demand"
+
+  sensitive-data-discovery:
+    display_name: "Sensitive Data Discovery"
+    catalog_id: CHK-047
+    category: "SYSTEM CONFIGURATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - sensitive data
+      - pii
+      - credit card column
+      - password column
+      - plaintext credential
+      - pci
+    skill: security-audit
+    test_tools:
+      - get_security_audit
+    thresholds_ref: "checks/references.yaml#sensitive-data-discovery"
+    temporal_default: live
+    recommended_frequency: "monthly; after schema changes; during compliance audits"
+    investigation_lookback: "point-in-time (catalog)"
+    alert_window: "on demand"
+
+  parameter-overrides:
+    display_name: "Database & Role Parameter Overrides"
+    catalog_id: CHK-048
+    category: "SYSTEM CONFIGURATION"
+    priority: medium
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - parameter override
+      - alter database set
+      - alter role set
+      - per-role setting
+      - override global config
+    skill: system-parameters
+    test_tools:
+      - get_setting_overrides
+      - get_db_configuration
+    thresholds_ref: "checks/references.yaml#parameter-overrides"
+    temporal_default: live
+    recommended_frequency: "weekly; after ALTER DATABASE/ROLE changes; during troubleshooting"
+    investigation_lookback: "30 days (ALTER events)"
+    alert_window: "on demand"
+
+  extension-inventory:
+    display_name: "Extension Inventory & Versions"
+    catalog_id: CHK-051
+    category: "SYSTEM CONFIGURATION"
+    priority: high
+    engines: [aurora-postgresql, rds-postgresql, self-managed-postgresql]
+    pg_version_compat: "RDS/Aurora PG 11-18, Aurora Serverless v2; self-managed 9.4+"
+    triggers:
+      - extension inventory
+      - missing extension
+      - is pg_stat_statements installed
+      - pgaudit installed
+      - extension upgrade
+    skill: extension-inventory
+    test_tools:
+      - get_extension_inventory
+      - get_db_configuration
+    thresholds_ref: "checks/references.yaml#extension-inventory"
+    temporal_default: live
+    recommended_frequency: "monthly; after major version upgrades"
+    investigation_lookback: "point-in-time (catalog)"
+    alert_window: "on demand"

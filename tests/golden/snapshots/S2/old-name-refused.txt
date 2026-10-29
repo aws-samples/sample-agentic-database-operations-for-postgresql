@@ -1,0 +1,15 @@
+Onboard database
+orders-db · RDS PostgreSQL · us-east-1 · account 111122223333
+✓
+Create read-only user & secret
+2
+Connect & test
+Secret ARN *
+This secret will be refused. It is named dbops/aurora-postgresql/orders-db/readonly, but this space's access role can only read secrets whose name starts with dbops/admin-a-00000000-4000-8000-000000000002/.
+Create it with the name from Step 1: dbops/admin-a-00000000-4000-8000-000000000002/postgres/orders-db/readonly
+Database name
+✕ This secret is named 'dbops/aurora-postgresql/orders-db/readonly', but this space's access role can only read secrets whose name starts with 'dbops/admin-a-00000000-4000-8000-000000000002/'. Create the secret with the name shown in Step 1 of the wizard (it starts with 'dbops/admin-a-00000000-4000-8000-000000000002/') and paste that ARN.
+Cancel
+Previous
+Test secret
+Onboard

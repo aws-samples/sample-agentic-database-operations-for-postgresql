@@ -1,0 +1,240 @@
+# Deployment settings — reference copy.
+#
+# The real files sit in this same directory, one per environment: deploy.<name>.config,
+# where the name is anything you choose (dev, uat, env1, ...). They are NOT committed,
+# because they hold an email address and an account-specific bucket name, which belong
+# to whoever is deploying rather than to the repository.
+#
+# You do not need to create one by hand. `make deploy` (or `make preflight`) first asks
+# which environment, then asks for these values and writes the file for you. Each
+# environment keeps its own file and its own build state, so two terminals can deploy
+# two environments - in two accounts, say - at the same time:
+#
+#     make deploy ENV=uat          # this run only
+#     export DEPLOY_ENV=uat        # every run in this terminal
+#     make envs                    # list the saved environments
+#
+# A new environment proposes a VPC range none of your other saved environments uses
+# (172.20.0.0/16, then 172.21.0.0/16, ...), so two of them can reach the same database.
+#
+# To pre-seed one instead of answering prompts:
+#
+#     cp deploy.config.example deploy.uat.config    # then edit the values below
+#
+# A checkout that only ever deploys one environment can keep a plain deploy.config
+# instead; it is used whenever no environment is named.
+#
+# The format is make syntax: KEY = value, no quoting needed. Anything set here can also
+# be overridden per-run on the command line, e.g. `make deploy RESOURCE_PREFIX=acme`.
+
+# ── Required ────────────────────────────────────────────────────────────────────
+
+# Cognito emails the first temporary password here, so a deployment with the wrong
+# address succeeds and then nobody can sign in. There is no safe default.
+INITIAL_ADMIN_EMAIL =
+
+# ── Identity and placement ──────────────────────────────────────────────────────
+
+# There is deliberately no AWS profile setting in this file.
+#
+# Which account you deploy into comes from your shell -
+# `export AWS_PROFILE=<name>` - or from the default credential chain, exactly as it does
+# for the aws CLI itself. Nothing here can change it, so switching accounts in a new
+# terminal just works, and there is no stored value to go stale or to contradict the
+# shell. An earlier version did store one, and it pointed a `make destroy` at a
+# different account than the operator was in.
+#
+# `make preflight` and every destructive command print the account they resolved, so you
+# can see where a command is about to land. For a one-off override without touching the
+# shell: `make deploy AWS_PROFILE=<name>`.
+
+# The account this environment was created in, recorded on its first run. It does not
+# choose the account - the shell does - it only makes every deploy, stage and destroy
+# refuse when the shell's credentials resolve to a different one, so `ENV=prod` run
+# from a terminal holding dev credentials stops before anything is touched. Leave it
+# empty here; it is filled in for you.
+ACCOUNT_ID =
+
+
+# 2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+# Prefixes every physical resource name, so two installations can coexist in one
+# account. Kept short because it also prefixes S3 bucket names and Lambda function
+# names, which have length limits.
+RESOURCE_PREFIX = dbops
+
+# us-east-1 or eu-west-1: the Regions whose AgentCore Availability Zones this solution
+# knows (see "Supported regions" in the README).
+AWS_REGION = us-east-1
+
+# CloudFormation stack name. Defaults to the resource prefix.
+STACK_NAME = dbops
+
+# Holds the staged nested templates and Lambda archives that CloudFormation reads during
+# the deploy. Created if it does not exist.
+#
+# Leave this empty. It defaults to <RESOURCE_PREFIX>-artifacts-<account-id>-<region>,
+# derived from whichever account and region you are deploying to - so an empty value is
+# correct in every account AND every region, while a saved one is wrong anywhere else.
+# The region is part of the name because an S3 bucket lives in one region, and a deploy
+# reads its templates from the bucket in its own region; sharing one name across regions
+# causes a cross-region redirect error. Set it only if you deliberately want a
+# differently named bucket.
+ARTIFACTS_BUCKET =
+
+# ── Optional ────────────────────────────────────────────────────────────────────
+
+# Display name for the first admin user.
+INITIAL_ADMIN_NAME = Administrator
+
+# Address for critical-finding alerts. Empty means no alerts are sent.
+NOTIFICATION_EMAIL =
+
+# ── Template behaviour: security, guardrails, capacity ──────────────────────────
+#
+# These are CloudFormation parameters of infrastructure/master.yaml, surfaced here so
+# they can be set without editing a template. The values below are the template's own
+# defaults, so leaving them alone changes nothing. `make config` offers to walk them.
+#
+# Blanking one is safe: the Makefile then omits it and CloudFormation applies the
+# template default.
+
+# AWS WAF on both CloudFront distributions: AWS managed baseline rules plus per-IP rate
+# limiting. ON by default - those distributions are the only public entry points, so they
+# are protected unless you decide otherwise.
+#
+# Cost: one WebACL per distribution, so two, each with four rules; it adds a per-WebACL
+# and per-request charge (see Indicative costs in the README). Set false if your own
+# org-level WAF already fronts this, or if you would rather not pay for it.
+#
+# Works in any Region. A CloudFront WebACL can only be CREATED through the us-east-1
+# control plane, so for a deployment outside us-east-1 `make deploy` first creates the
+# WebACLs in a small us-east-1 edge stack and attaches them; they are enforced at the
+# CloudFront edge nearest each viewer, with no added latency, and `make destroy` removes
+# the edge stack too.
+ENABLE_WAF = true
+
+# A CloudTrail scoped to this deployment, with log-file validation, writing to its own
+# encrypted bucket. ON by default so an audit trail exists without anyone asking for one.
+#
+# Set false if an organisation-level trail already covers this account. AWS delivers the
+# first copy of management events per region free, so a second trail is charged per event
+# on top of S3 storage - and those events are ones you already have. The bucket is
+# retained on stack deletion, so a teardown cannot destroy the audit record; remove it
+# with 'make purge-orphans' if you want it gone.
+ENABLE_CLOUDTRAIL = true
+
+# Cognito advanced security: compromised-credential detection and adaptive authentication.
+# OFF by default because it requires the Cognito Plus tier, which is billed per monthly
+# active user. Mandatory MFA and the sign-in rate limit apply regardless. Set true to turn
+# it on; see the README "Where to harden further" section.
+ENABLE_COGNITO_THREAT_PROTECTION = false
+
+# Bedrock guardrail on every model call: prompt-attack detection, PII redaction, content
+# filters. On by default. Setting it to false runs with no guardrail rather than failing.
+# Keep comments on their own line, never after a value: make would treat the '#' as the
+# start of a comment and leave trailing whitespace in the value, and the tooling that
+# rewrites this file reads the line literally.
+ENABLE_GUARDRAIL = true
+# NONE | LOW | MEDIUM | HIGH
+GUARDRAIL_CONTENT_STRENGTH = LOW
+# NONE | LOW | MEDIUM | HIGH
+GUARDRAIL_PROMPT_ATTACK_STRENGTH = MEDIUM
+# ANONYMIZE (redact) | BLOCK
+GUARDRAIL_PII_ACTION = ANONYMIZE
+
+# Alert-only guardrail alarms (never block a call). Notify when ApplyGuardrail throttles
+# more than this many times in 5 minutes (approaching the account quota). A super admin can
+# retune it later in the admin console; a redeploy reads the live alarm and keeps that value.
+GUARDRAIL_THROTTLE_ALARM_THRESHOLD = 5
+
+# Alert-only. Notify when the input guardrail intervenes (blocks a turn) more than this many
+# times in 5 minutes (a possible abuse spike). Console-retunable; reconciled on redeploy.
+GUARDRAIL_INTERVENTION_ALARM_THRESHOLD = 25
+
+# Managed AgentCore web search for the research agent. Queries go to an AWS-operated
+# index through the managed connector rather than leaving for a third party.
+# Available in us-east-1, eu-west-1 and ap-northeast-1; skipped in any other Region (the
+# deploy still succeeds, and `make config` defaults this to false there).
+ENABLE_WEB_SEARCH = true
+
+# Bedrock model for the agent. Whatever you choose must be enabled for your account in
+# this region under Bedrock -> Model access, or the agent deploys but cannot answer.
+# `make config` proposes the Region's geographic profile where Bedrock offers one
+# (eu.* in Europe, us.* in the US), so model calls stay in that geography. A fresh
+# install starts with this model enabled and as the default in the admin console.
+AGENT_MODEL_ID = global.anthropic.claude-haiku-5-5
+
+# The metrics store is DynamoDB (records) plus CloudWatch custom metrics (the series);
+# there is no cluster to size and nothing idle to pay for. The one knob: how long the
+# Tier 1 RAW 5-minute samples (with their table-bloat and wait-event detail) are kept
+# before DynamoDB's TTL removes them. A database's own monitoring setting overrides it.
+# The numeric series outlives them in CloudWatch (5-minute points for 63 days, hourly
+# for 15 months) and deep scans are kept for years, so this only bounds the detail table.
+TIER1_RETENTION_DAYS = 30
+
+# Retention for VPC flow logs, API Gateway access logs and the log-archive bucket.
+LOG_RETENTION_DAYS = 90
+
+# How long a refresh token stays valid, in days, before a user must sign in again.
+# Shorter bounds how long a stolen refresh token (both SPAs hold theirs in localStorage)
+# can be used; logout and a privilege change revoke it immediately regardless. Access and
+# id tokens are fixed at 60 minutes. 1-3650; lower is safer, higher is fewer re-logins.
+REFRESH_TOKEN_VALIDITY_DAYS = 7
+
+# Monthly cost budget in USD. Alert-only: it emails NOTIFICATION_EMAIL (when set) at 80%
+# and 100% of this amount and never blocks anything. A super admin can change it later in
+# the admin console; a redeploy reads the live budget and keeps that value.
+BUDGET_LIMIT_AMOUNT = 100
+
+# In-app JWT signature verification. The backend re-verifies every bearer against
+# the Cognito JWKS (signature, issuer, expiry, app-client binding) on top of the API
+# Gateway / AgentCore edge authorizers. 'enforce' (default) rejects a genuine failure;
+# 'log' verifies and logs only; 'off' disables it. Enforce is safe because the edge
+# already verifies every sanctioned request, so this only rejects a token that reached the
+# backend without the edge, and it fails open on a JWKS/dependency outage. Leave at
+# 'enforce' unless you are debugging an auth problem.
+JWT_SIGNATURE_VERIFICATION = enforce
+# PostgreSQL port range (from-to) the daily deep scan may reach. The scan task's security
+# group allows egress to these ports only (plus 5432 for the metrics store). Widen it,
+# e.g. 5432-5440, when a monitored database listens on another port; Configure warns
+# when a database's port is outside the range.
+DB_PORT_RANGE = 5432-5432
+# How the agent reaches a database in its own region. 'peering-first' (default) peers
+# the database VPC and uses a VPC Lattice resource endpoint only when that VPC's address
+# range is already routed to another peered VPC (two accounts both on 10.0.0.0/16).
+# 'lattice' uses a resource endpoint for every same-region database, so no route is ever
+# added to a database VPC; it adds a small hourly charge per database (see Indicative
+# costs in the README). Databases in other regions always peer.
+SAME_REGION_CONNECTIVITY = peering-first
+# Admin audit log. While AUDIT_VAULT is on, every privileged admin-console action is
+# written once to an S3 bucket with Object Lock (COMPLIANCE): nobody, not even the
+# account root user, can change or delete a record before its retention ends. A super
+# admin can switch the vault and raise retention in Settings > Audit; a redeploy keeps
+# the console values. AUDIT_RETENTION_DAYS is the floor nothing at runtime can go
+# below; changing it affects new records only. A bucket holding locked records
+# outlives `make destroy` until the last one expires. Trials and test stacks: set
+# AUDIT_VAULT = off so teardown leaves an empty bucket that is deleted. The bucket
+# adds a small S3 storage charge; see Indicative costs in the README.
+AUDIT_VAULT = on
+AUDIT_RETENTION_DAYS = 365
+
+# From-address for user invitations. Must already be a verified SES identity or
+# invitations will not deliver. Empty means you configure it later in the admin
+# console instead.
+EMAIL_SENDER_ADDRESS =
+EMAIL_SENDER_NAME =
+
+# ─── Network addressing ────────────────────────────────────────────────────────────────
+# The VPC this deployment creates, and the four subnets inside it. The defaults suit
+# almost every account. The one reason to change them is an overlap with a VPC you intend
+# to peer with, because peering rejects overlapping ranges.
+#
+# If you change VPC_CIDR, change all four subnets to sit inside the new range.
+# CloudFormation rejects a subnet outside its VPC, and reports it against the subnet
+# resource rather than the setting, well into the deploy. 'make config' checks this for
+# you before anything is created.
+VPC_CIDR = 172.20.0.0/16
+PUBLIC_SUBNET1_CIDR = 172.20.1.0/24
+PUBLIC_SUBNET2_CIDR = 172.20.2.0/24
+PRIVATE_SUBNET1_CIDR = 172.20.10.0/24
+PRIVATE_SUBNET2_CIDR = 172.20.20.0/24

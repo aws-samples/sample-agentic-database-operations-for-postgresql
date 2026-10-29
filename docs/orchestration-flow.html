@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en"><head><style>
+  /* Self-contained: the authoring editor's theme block was stripped — the
+     diagram CSS below references none of its variables. */
+  :root { color-scheme: light; }
+</style>
+<meta charset="UTF-8">
+<title>DBOps Agent, Orchestration Flow</title>
+<style>
+  :root{
+    --ink:#111; --line:#333;
+    --grey-box:#f0f0f0; --grey-border:#9aa0a6;
+    --orange:#ffd8a8; --orange-bd:#e8890c;
+    --green:#b7e1c4; --green-bd:#3f9d63;
+    --blue:#cfe2f3; --blue-bd:#3a78b5;
+    --red:#f4b8b8; --red-bd:#c0392b;
+    --yellow:#fff4c2; --yellow-bd:#d4b106;
+    --note-red:#fde2e2; --note-red-bd:#c0392b;
+    --datafile:#eceff1; --datafile-bd:#78909c;
+    --anno:#6b7280;
+  }
+  *{box-sizing:border-box;}
+  body{background:#fff;color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;margin:0;padding:26px 20px 40px;}
+  h1{font-size:19px;font-weight:700;text-align:center;margin:0 0 22px;}
+  .flow{max-width:1180px;margin:0 auto;}
+  .col{display:flex;flex-direction:column;align-items:center;}
+
+  /* boxes */
+  .box{border:1.5px solid var(--line);padding:9px 13px;font-size:12px;line-height:1.35;text-align:center;background:#fff;border-radius:4px;max-width:250px;}
+  .box b{font-weight:700;}
+  .entry{background:var(--grey-box);border-color:#8b8b8b;border-radius:20px;font-weight:600;padding:9px 26px;}
+  .orchestrator{background:var(--orange);border-color:var(--orange-bd);max-width:430px;}
+  .proc{background:var(--blue);border-color:var(--blue-bd);}
+  .gate{background:var(--red);border-color:var(--red-bd);}
+  .emph{border-width:3px;}
+  .outcome{font-size:11px;color:#444;font-style:italic;text-align:center;padding:3px 6px;}
+
+  /* classification shapes — green rounded rectangles with a small top chevron (original style) */
+  .diamond-wrap{display:flex;justify-content:center;align-items:stretch;width:100%;}
+  .diamond{position:relative;width:100%;background:var(--green);border:1.5px solid var(--green-bd);
+           border-radius:6px;padding:14px 12px;min-height:72px;display:flex;align-items:center;justify-content:center;}
+  .diamond::before{content:"";position:absolute;top:-7px;left:50%;transform:translateX(-50%) rotate(45deg);
+           width:12px;height:12px;background:var(--green);border-left:1.5px solid var(--green-bd);border-top:1.5px solid var(--green-bd);}
+  .diamond > span{display:block;width:100%;text-align:center;font-size:11.5px;line-height:1.3;}
+  .diamond > span b{font-weight:700;}
+
+  /* arrows */
+  .arrow{display:flex;flex-direction:column;align-items:center;margin:2px 0;}
+  .arrow .stem{width:2px;height:20px;background:var(--line);}
+  .arrow .head{width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:8px solid var(--line);}
+  .arrow .lbl{font-size:10px;color:#444;background:#fff;padding:1px 5px;margin-bottom:1px;max-width:200px;text-align:center;line-height:1.25;}
+  .arrow.short .stem{height:12px;}
+
+  /* notes */
+  .note{border:1px dashed;border-radius:5px;padding:6px 9px;font-size:10px;line-height:1.35;max-width:210px;}
+  .note.yellow{background:var(--yellow);border-color:var(--yellow-bd);}
+  .note.red{background:var(--note-red);border-color:var(--note-red-bd);}
+  .callout{background:#eef4ff;border:1.5px solid var(--blue-bd);border-radius:5px;padding:6px 9px;font-size:10px;line-height:1.3;max-width:200px;font-style:italic;color:#234;}
+
+  /* lanes */
+  .lane{border:2px dashed var(--grey-border);border-radius:8px;padding:32px 18px 22px;margin:10px 0;position:relative;}
+  .lane-label{position:absolute;top:-11px;left:18px;background:#fff;padding:0 8px;font-size:12px;font-weight:700;letter-spacing:.4px;color:#555;}
+  .lane.apart{border-color:#b0778f;background:#fdfbfc;}
+
+  /* chat branches */
+  .branches{display:flex;gap:16px;justify-content:center;flex-wrap:wrap;align-items:flex-start;}
+  .branch{flex:1 1 180px;max-width:215px;display:flex;flex-direction:column;align-items:center;}
+  .branch .proc{width:100%;}
+  .branch .note{margin-top:8px;width:100%;max-width:100%;}
+
+  /* investigation steps */
+  .step{display:grid;grid-template-columns:130px minmax(330px,470px) 240px;gap:16px;align-items:center;width:100%;max-width:980px;margin:0 auto;}
+  .anno{font-style:italic;color:var(--anno);font-size:11px;text-align:right;}
+  .side{display:flex;flex-direction:column;gap:8px;align-items:flex-start;}
+  .step .proc{width:100%;max-width:none;}
+  .step .proc{position:relative;padding-left:34px;}
+  .stepnum{position:absolute;left:9px;top:50%;transform:translateY(-50%);font-weight:800;font-size:15px;color:var(--blue-bd);}
+  .subagents{display:flex;flex-direction:column;gap:6px;width:100%;}
+  .subagents .proc{width:100%;font-size:11px;}
+  .dbl{font-size:10px;color:#444;text-align:center;font-style:italic;width:100%;}
+  .iarrow{display:grid;grid-template-columns:130px minmax(330px,470px) 240px;gap:16px;width:100%;max-width:980px;margin:0 auto;}
+  .iarrow > .arrow{grid-column:2;margin:2px 0;}
+
+  /* scan lane */
+  .scan-side{display:flex;gap:34px;justify-content:center;align-items:flex-start;flex-wrap:wrap;margin-top:8px;}
+  /* scan merge: centred store with a collector feeding from the left */
+  .scan-merge{position:relative;display:flex;justify-content:center;align-items:center;width:100%;}
+  .scan-merge .feed{position:absolute;right:calc(50% + 130px);display:flex;align-items:center;gap:0;}
+  .feed-arrow{display:flex;align-items:center;}
+  .feed-arrow .lbl{font-size:10px;color:#444;background:#fff;padding:0 5px;}
+  .feed-arrow .fstem{height:2px;width:26px;background:var(--line);}
+  .feed-arrow .fhead{width:0;height:0;border-top:5px solid transparent;border-bottom:5px solid transparent;border-left:8px solid var(--line);}
+
+  /* data files */
+  .datalayer{display:flex;gap:26px;justify-content:center;align-items:flex-start;flex-wrap:wrap;margin:6px 0;}
+  .datafile{background:var(--datafile);border:1.5px solid var(--datafile-bd);border-top:5px solid var(--datafile-bd);
+            border-radius:4px 4px 12px 12px;padding:10px 13px;font-size:11px;line-height:1.35;max-width:290px;}
+  .datafile .fname{font-family:'SF Mono',Menlo,Consolas,monospace;font-weight:700;font-size:11.5px;}
+  .datafile .out{display:flex;flex-direction:column;gap:4px;margin-top:8px;}
+  .out-arrow{background:#fff;border:1px solid var(--blue-bd);border-left:4px solid var(--blue-bd);border-radius:3px;padding:4px 7px;font-size:10px;line-height:1.28;}
+  .out-arrow .to{font-weight:700;color:var(--blue-bd);}
+
+  .xref{font-size:10.5px;color:#555;font-style:italic;border:1px dashed var(--grey-border);border-radius:5px;padding:6px 10px;background:#fcfcfc;max-width:560px;margin:12px auto 0;text-align:center;}
+  .row2{display:flex;gap:16px;justify-content:center;align-items:flex-start;flex-wrap:wrap;}
+  /* bottom reference panel */
+  .refpanel{border:1.5px solid #999;border-radius:8px;background:#fafafa;max-width:1100px;margin:26px auto 0;padding:14px 18px 16px;}
+  .refpanel h3{margin:0;font-size:13.5px;font-weight:800;color:#333;}
+  .refpanel .refsub{margin:2px 0 12px;font-size:11px;font-style:italic;color:#8a8f98;}
+  .refgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;}
+  .refcol{border:1px solid #d8dbe0;border-radius:6px;background:#fff;padding:10px 12px;}
+  .refcol h4{margin:0 0 6px;font-size:11px;font-weight:800;letter-spacing:.4px;color:#3a78b5;}
+  .refcol ul{margin:0;padding-left:15px;}
+  .refcol li{font-size:10.5px;line-height:1.5;color:#333;margin-bottom:3px;}
+  .refcol .plain{font-size:10.5px;line-height:1.5;color:#333;margin:0 0 4px;}
+  .refcol code{font-family:'SF Mono',Menlo,Consolas,monospace;font-size:10px;}
+  @media(max-width:900px){.refgrid{grid-template-columns:repeat(2,1fr);}}
+</style>
+</head>
+<body>
+<div class="flow">
+  <h1>DBOps Agent, Orchestration Flow</h1>
+
+  <!-- ENTRY -->
+  <div class="col">
+    <div class="box entry">User question</div>
+    <div class="arrow"><span class="stem"></span><span class="head"></span></div>
+  </div>
+
+  <div class="row2">
+    <div class="box orchestrator"><b>ORCHESTRATOR</b> — classifies the request. No analysis tools of its own, so it either delegates one call or hands off.</div>
+    <div class="note yellow">Always-on accuracy and safety rules sit in both agents' prompts, so they apply before any tool runs. A separate Amazon Bedrock Guardrail screens prompt input and model output at the platform level, independently of this flow.</div>
+  </div>
+
+  <div class="arrow"><span class="stem"></span><span class="head"></span></div>
+
+  <!-- LANE: CHAT -->
+  <div class="lane">
+    <span class="lane-label">CHAT</span>
+    <div class="branches">
+
+      <div class="branch">
+        <div class="diamond-wrap"><div class="diamond"><span><b>LOOKUP</b><br>one fact</span></div></div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box proc">One specialist, one tool call, postgres_agent or observability_agent</div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="outcome">Answer in a sentence</div>
+      </div>
+
+      <div class="branch">
+        <div class="diamond-wrap"><div class="diamond"><span><b>ADVICE</b><br>what should I tune?</span></div></div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box proc">get_runbooks loads the engine guide, then load_skill loads one chat skill and the agent follows its procedure and safety gate. docs_agent verifies the recommendation.</div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="outcome">Answer with source URLs</div>
+        <div class="note yellow" style="border-style:solid;background:#f4f5f7;border-color:#b8bec6;">Chat can load skills, but only bounded ones, index hygiene, stale statistics and similar. Never root-cause work. The menu of loadable chat skills is built from registry.yaml.</div>
+      </div>
+
+      <div class="branch">
+        <div class="diamond-wrap"><div class="diamond"><span><b>EXPLAIN</b><br>what is autovacuum?</span></div></div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box proc">Answered directly, or via docs_agent</div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="outcome">Explanation</div>
+      </div>
+
+      <div class="branch">
+        <div class="diamond-wrap"><div class="diamond"><span><b>STATUS</b><br>show me the latest scan</span></div></div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box proc">get_report_analysis, reads the stored scan</div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="outcome">Stored findings</div>
+      </div>
+
+      <div class="branch">
+        <div class="diamond-wrap"><div class="diamond"><span><b>DIAGNOSTIC</b><br>why / what's wrong / slow / growing</span></div></div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box gate"><b>HARD GATE</b> — cannot call any specialist. Its only move is recommend_investigation, which offers "Start investigation". No checking first, no numbers before the offer. If no symptom was named at all, it may first ask the operator ONE clarifying question with symptom options (still no tools); the reply keeps the diagnosis intent.</div>
+        <div class="note red">Inline diagnosis in chat produced fabricated numbers in earlier runs.</div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box gate"><b>User must ACCEPT</b> by clicking — chat never starts one on its own. A worded "yes, start it" only re-surfaces the button; the model cannot start it either.</div>
+        <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+        <div class="box gate"><b>Chat WAITS</b> while the investigation runs (composer paused, no pills; other chats stay usable), then receives a hand-off turn: the outcome, "Open investigation", and pills that discuss the stored result here.</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="arrow"><span class="lbl">user ACCEPTS</span><span class="stem"></span><span class="head"></span></div>
+
+  <!-- LANE: INVESTIGATION -->
+  <div class="lane">
+    <span class="lane-label">INVESTIGATION</span>
+
+    <div class="step">
+      <div class="anno">Deterministic</div>
+      <div class="box proc"><span class="stepnum">1</span>Pre-select the likely skill, matches the symptom against the curated trigger phrases in registry.yaml</div>
+      <div class="side"><div class="callout">Plain keyword matching — reproducible, not vector similarity</div></div>
+    </div>
+    <div class="iarrow"><div class="arrow"><span class="stem"></span><span class="head"></span></div></div>
+
+    <div class="step">
+      <div class="anno"></div>
+      <div class="box proc"><span class="stepnum">2</span>get_runbooks, the engine guide for this database, the investigation protocol, and the skill catalogue built from registry.yaml</div>
+      <div class="side"></div>
+    </div>
+    <div class="iarrow"><div class="arrow"><span class="stem"></span><span class="head"></span></div></div>
+
+    <div class="step">
+      <div class="anno">LLM-decided</div>
+      <div class="box proc"><span class="stepnum">3</span>load_skill, exactly one skill. May override the pre-selection, cannot skip it.</div>
+      <div class="side"><div class="callout">The matcher sets the default, the model has the final say</div></div>
+    </div>
+    <div class="iarrow"><div class="arrow"><span class="stem"></span><span class="head"></span></div></div>
+
+    <div class="step">
+      <div class="anno">Deterministic</div>
+      <div class="box proc"><span class="stepnum">4</span>Mandatory baseline, get_current_activity, runs regardless of which skill was chosen</div>
+      <div class="side"></div>
+    </div>
+    <div class="iarrow"><div class="arrow"><span class="stem"></span><span class="head"></span></div></div>
+
+    <div class="step">
+      <div class="anno">LLM-decided</div>
+      <div class="box proc"><span class="stepnum">5</span>Run the skill's steps. Delegates by intent, never by SQL.</div>
+      <div class="side">
+        <div class="dbl">⇄ by intent / facts back</div>
+        <div class="subagents">
+          <div class="box proc">PostgreSQL specialist, structured, read-only tools</div>
+          <div class="box proc">Observability specialist, CloudWatch, Performance Insights, logs</div>
+        </div>
+        <div class="note yellow" style="border-style:solid;background:#f4f5f7;border-color:#b8bec6;width:100%;max-width:100%;">The supervisor can also call get_historical_metrics for trends and get_instance_details for capacity, but it never runs SQL against the customer database itself.</div>
+      </div>
+    </div>
+    <div class="iarrow"><div class="arrow"><span class="stem"></span><span class="head"></span></div></div>
+
+    <div class="step">
+      <div class="anno">Deterministic</div>
+      <div class="box proc emph"><span class="stepnum">6</span>Severity applied in Python from the threshold bands in references.yaml, not by the model</div>
+      <div class="side"></div>
+    </div>
+    <div class="iarrow"><div class="arrow"><span class="stem"></span><span class="head"></span></div></div>
+
+    <div class="step">
+      <div class="anno"></div>
+      <div class="box proc"><span class="stepnum">7</span>docs_agent verifies the recommendations, then the report is produced, findings, root cause, actions, summary</div>
+      <div class="side"></div>
+    </div>
+  </div>
+
+  <!-- LANE: SCAN + LEARNING -->
+  <div class="lane apart">
+    <span class="lane-label">SCAN + LEARNING — separate schedule</span>
+    <div class="col">
+      <div class="box proc">Scheduled deep scan</div>
+      <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+      <div class="box proc">Findings engine — applies the same references.yaml thresholds. No LLM.</div>
+      <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+
+      <!-- centred spine step with a side feed coming in from the left -->
+      <div class="scan-merge">
+        <div class="feed">
+          <div class="box proc">Metrics collector, every few minutes</div>
+          <div class="feed-arrow"><span class="lbl">side feed</span><span class="fstem"></span><span class="fhead"></span></div>
+        </div>
+        <div class="box proc" style="border-width:2.5px;">Metrics store + saved report — read by get_report_analysis (chat STATUS) and get_historical_metrics (investigation step 5)</div>
+      </div>
+
+      <div class="arrow short"><span class="stem"></span><span class="head"></span></div>
+      <div class="box proc">Learning agent, compares against history, raises or resolves recommendations</div>
+      <div class="note yellow" style="border-style:solid;background:#fbf3f7;border-color:#b0778f;margin-top:10px;max-width:340px;text-align:center;">Runs after a scan, not after an investigation.</div>
+    </div>
+
+  </div>
+
+  <p style="font-style:italic;color:#6b7280;font-size:11px;text-align:center;max-width:900px;margin:22px auto 0;line-height:1.5;">registry.yaml and references.yaml are each read by both surfaces, the same triggers drive investigation matching and the chat skill menu, and the same thresholds drive agent severity and the batch scan. That is why a scan and a chat answer never disagree.</p>
+
+  <!-- BOTTOM REFERENCE PANEL (not part of the flow) -->
+  <div class="refpanel">
+    <h3>What's in the system</h3>
+    <p class="refsub">Reference only, not part of the flow above.</p>
+    <div class="refgrid">
+
+      <div class="refcol">
+        <h4>AGENTS</h4>
+        <p class="plain">2 supervisors: Orchestrator (chat) and Investigation agent.</p>
+        <p class="plain">3 specialists, shared as delegation targets by both supervisors:</p>
+        <ul>
+          <li>PostgreSQL, 52 structured read-only tools</li>
+          <li>Observability, 17 tools, CloudWatch / Performance Insights / CloudTrail / logs</li>
+          <li>Research (docs_agent), web search plus trusted-page fetch</li>
+        </ul>
+        <p class="plain">1 agent outside both supervisors:</p>
+        <ul>
+          <li>Learning, 1 tool (Research). Trend analysis. Invoked by the scan pipeline, not reachable from chat or an investigation.</li>
+        </ul>
+        <p class="plain">Supervisors stay small and delegate; the heavy tool sets live on the specialists.</p>
+      </div>
+
+      <div class="refcol">
+        <h4>RUNBOOKS (SOPs)</h4>
+        <p class="plain">7 files. The accuracy and safety guardrails are always in both system prompts.</p>
+        <p class="plain">An investigation loads 4 via get_runbooks: protocol, diagnostics, data-source rules, and one engine guide (Aurora or RDS, never both).</p>
+        <p class="plain">Chat loads 2: the engine guide and data-source rules. No RCA protocol.</p>
+      </div>
+
+      <div class="refcol">
+        <h4>SKILLS</h4>
+        <p class="plain">32 total, 9 of them available in chat.</p>
+        <p class="plain">Each is a folder with a SKILL.md: frontmatter declaring name, description, allowed tools and which surface it appears on, then the procedure in the body.</p>
+        <p class="plain">Exactly one loads per investigation, and only when needed.</p>
+      </div>
+
+      <div class="refcol">
+        <h4>CHECKS AND THRESHOLDS</h4>
+        <p class="plain"><code>registry.yaml</code>, 51 checks with their curated symptom triggers and the skill each maps to.</p>
+        <p class="plain"><code>references.yaml</code>, severity threshold bands for the same 51 checks.</p>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+</body></html>

@@ -1,0 +1,64 @@
+Payments
+Payments databases
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+0 databases
+metadata refreshed for 0 of 0
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+2
+Databases
+Run discovery, then onboard with a read-only secret
+Agent capabilitiesoptional
+Knowledge, skills and model for this space
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Cloud sources
+The primary account is where DBOps Agent (Beta) runs. Add secondary accounts to let it reach databases elsewhere; they are validated in the next section.
+Primary source — required
+ACCOUNT ID ACCOUNT TYPE STATUS LAST UPDATED
+111122223333 Primary AWS Account ✓ Valid <date>
+Secondary sources (0)
+Add
+No secondary accounts configured.
+Add source
+Regions & access
+For each account, pick the regions it has databases in; discovery scans exactly those. Leave an account empty to skip it — the deployment account can stay empty if it has no databases. Then validate access: this verifies every account's role and sets up Resource Explorer in every region in use.
+111122223333
+primary
+1 region: us-east-1
+Done
+AMERICAS
+us-east-1
+us-east-2
+us-west-1
+us-west-2
+sa-east-1
+ca-central-1
+EUROPE
+eu-west-1
+eu-west-2
+eu-west-3
+eu-central-1
+eu-north-1
+ASIA PACIFIC
+ap-southeast-1
+ap-southeast-2
+ap-northeast-1
+ap-northeast-2
+ap-south-1
+Discovery will scan 1 region in total: us-east-1.
+All accounts validated in 1 region.
+Delete this Agent Space
+Removes the space and its operator access. Databases shared with other spaces stay with them. This cannot be undone.
+Delete Agent Space
+Overview
+Next: Databases

@@ -1,0 +1,1751 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Fargate + API Gateway for DB Optimization REST API
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, DynamoDB table names and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  ContainerImageUri:
+    Type: String
+    Description: ECR image URI for the FastAPI container
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks
+
+  # NOTE: there is deliberately no SecurityGroupIds parameter. The VPC Link now
+  # uses its own VpcLinkSecurityGroup (declared with the security groups below),
+  # and the ECS task takes the shared private group via PrivateSecurityGroupId,
+  # which was always the parameter carrying it for that purpose. SecurityGroupIds
+  # passed the same value a second time for the VPC Link alone, so it went away
+  # with that use.
+
+  UserPoolId:
+    Type: String
+    Description: Cognito User Pool ID
+
+  WebClientId:
+    Type: String
+    Description: Cognito Web Client ID
+
+  M2MClientId:
+    Type: String
+    Default: ''
+    Description: M2M client ID (Client Credentials flow)
+
+  AllowedCorsOrigins:
+    Type: CommaDelimitedList
+    Default: '*'
+    Description: >
+      Browser origins allowed to call the API (CORS). Default '*' preserves prior
+      behavior for standalone/dev deploys; the customer master stack passes the exact
+      deployed frontend + admin-console origins so those apps are the only allowed
+      browser callers.
+
+  ReportsS3Bucket:
+    Type: String
+
+  DbConfigTable:
+    Type: String
+
+  AgentModelId:
+    Type: String
+    Default: global.anthropic.claude-haiku-5-5
+
+  GuardrailId:
+    Type: String
+    Default: ''
+    Description: >
+      Id of the guardrail attached to the model, screening responses (empty = no
+      guardrail; fail-soft).
+
+  GuardrailVersion:
+    Type: String
+    Default: ''
+    Description: Version of the model-attached guardrail (empty = no guardrail; fail-soft).
+
+  InputGuardrailId:
+    Type: String
+    Default: ''
+    Description: >
+      Id of the guardrail applied to a single user turn before it reaches the agent
+      (empty = no input screening; fail-soft).
+
+  InputGuardrailVersion:
+    Type: String
+    Default: ''
+    Description: Version of the input-screening guardrail (empty = no input screening).
+
+  JwtSignatureVerification:
+    Type: String
+    Default: 'enforce'
+    Description: >
+      In-app JWT signature verification of bearer tokens, behind the API Gateway
+      Cognito authorizer. 'enforce' (default) re-verifies the signature and REJECTS a forged
+      token that reached the app without passing the edge; 'log' verifies and logs a mismatch
+      but never rejects; 'off' disables the in-app check. Enforce fails open only on genuine
+      infrastructure unavailability (JWKS unreachable, crypto/pool unavailable).
+  DbPortRange:
+    Type: String
+    Default: '5432-5432'
+    AllowedPattern: '^\d{1,5}-\d{1,5}$'
+    Description: >
+      PostgreSQL port range (from-to) the deep scan may reach. Configure warns when a
+      database's port is outside it.
+  SameRegionConnectivity:
+    Type: String
+    Default: 'peering-first'
+    AllowedValues: ['peering-first', 'lattice']
+    Description: >
+      How the agent reaches a same-region database. 'peering-first' (default) peers the
+      database VPC and falls back to a VPC Lattice resource endpoint only when that VPC's
+      address range is already routed to another peered VPC. 'lattice' uses a resource
+      endpoint for every same-region database so no route is ever added to a database
+      VPC; it adds a small hourly charge per database (see Indicative costs in the
+      README). Cross-region databases always peer.
+  AuditBucketName:
+    Type: String
+    Default: ''
+    Description: >
+      Admin audit vault bucket (storage stack output). Empty leaves the task with no
+      vault grant; with the vault switch on, every audited action is then recorded
+      index-only and the write-failure alarm fires.
+  AuditVault:
+    Type: String
+    Default: 'on'
+    AllowedValues: ['on', 'off']
+    Description: >
+      Initial state of the admin audit vault switch, used until a super admin first
+      changes it in Settings > Audit.
+  AuditRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 3653
+    Description: >
+      Minimum days each admin audit record is locked (S3 Object Lock, COMPLIANCE). IAM
+      refuses any per-object lock below it, so a console-raised retention can never go
+      under this floor.
+  GuardrailEnforce:
+    Type: String
+    Default: 'on'
+    Description: >
+      Fail-closed guardrail enforcement: if a Bedrock guardrail cannot be resolved,
+      refuse the LLM call instead of running unguarded. Applies to both the
+      model-attached guardrail and the input screen. Default 'on' — safe here because
+      all four ids and versions are wired from the guardrail stack on a full deploy. Set
+      'false' to revert to fail-soft (e.g. a partial/standalone deploy with no
+      guardrail).
+
+  NotificationTopicArn:
+    Type: String
+    Default: ''
+
+  # Where database alarm emails go (the deployment's notification email): shown in the
+  # console's alarm settings, which check whether SES can reach it.
+  AlarmEmailRecipient:
+    Type: String
+    Default: ''
+
+  BatchJobQueue:
+    Type: String
+    Default: ''
+
+  BatchJobDefinition:
+    Type: String
+    Default: ''
+
+  ScanTriggerLambdaArn:
+    Type: String
+    Default: ''
+    Description: Lambda ARN for scan trigger (used by scheduler)
+
+  SchedulerRoleArn:
+    Type: String
+    Default: ''
+    Description: EventBridge Scheduler role ARN (for per-database schedules)
+
+  ScanSchedulerDlqArn:
+    Type: String
+    Default: ''
+    Description: Dead-letter queue ARN for the Tier 2 scan-trigger schedules
+
+  Tier1CollectorLambdaArn:
+    Type: String
+    Default: ''
+    Description: Tier 1 metrics collector Lambda ARN
+
+  Tier1SchedulerRoleArn:
+    Type: String
+    Default: ''
+    Description: EventBridge Scheduler role ARN for Tier 1 schedules
+
+  AgentVpcId:
+    Type: String
+    Description: Dedicated VPC ID for the agent platform
+
+  AgentVpcCidr:
+    Type: String
+    Default: '172.20.0.0/16'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-4])$'
+    Description: >
+      CIDR block of the dedicated agent VPC. Must match the VpcCidr the VPC stack
+      was created with: the ALB and ECS security groups trust this range, so a
+      mismatch produces a stack that deploys and then cannot talk to itself.
+
+  PrivateRouteTableId:
+    Type: String
+    Description: Private route table ID for adding peering routes
+
+  PrivateSecurityGroupId:
+    Type: String
+    Description: Private security group ID (agent workloads)
+
+  Tier1MetricsTable:
+    Type: String
+    Description: DynamoDB table holding the Tier 1 rows (the API reads it)
+
+  Tier2ScansTable:
+    Type: String
+    Description: DynamoDB table holding the Tier 2 scans (the API reads it)
+
+
+  ArtifactsVersion:
+    Type: String
+    Default: ''
+    Description: >
+      Content hash of the staged deploy artifacts, produced by
+      deployment/build-s3-dist.sh. Surfaced as an env var on the task definition so
+      a changed value forces ECS to roll the service. Mostly belt-and-braces: the
+      build tags images with a timestamp, so ContainerImageUri already changes on
+      every build. Informational otherwise - no application code reads it.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Retention period (days) for API Gateway access logs.
+
+  ApiThrottleRateLimit:
+    Type: Number
+    Default: 100
+    Description: >
+      Steady-state request/second ceiling for the whole REST API (API Gateway
+      stage throttle). Sheds flood/runaway traffic; well above normal use, so
+      legitimate callers are unaffected. Raise it for larger fleets.
+
+  ApiThrottleBurstLimit:
+    Type: Number
+    Default: 200
+    Description: >
+      Short-spike allowance (token-bucket depth) for the REST API stage throttle.
+      Absorbs bursty page loads that fan out into several calls at once.
+
+  EnableWAF:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Informational: reflects whether AWS WAF is enabled on the CloudFront
+      distributions. Surfaced read-only on the admin console Security page.
+
+  EnableCloudTrail:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Informational: reflects whether a deployment-scoped CloudTrail is enabled.
+      Surfaced read-only on the admin console Security page.
+
+  MemoryId:
+    Type: String
+    Default: ''
+    Description: >
+      AgentCore Memory resource ID (from the agent stack's MemoryId output).
+      Lets the REST API read conversation events to rehydrate reopened chats.
+      Leave empty to disable chat-history rehydration.
+  RootStackName:
+    Type: String
+    Default: ''
+    Description: >
+      Name of the root (master) stack this API belongs to. Informational: the admin
+      console's Security page names it as the stack to update for the optional controls.
+      A nested stack's own AWS::StackName is the generated child name, hence passed in.
+
+Conditions:
+  HasMemoryId: !Not [!Equals [!Ref MemoryId, '']]
+  # WAF is only created in us-east-1 (see WafEnabled in frontend.yaml); the Security page
+  # must report what is deployed, not what was asked for.
+  # WAF is attached whenever it is enabled, in every Region: us-east-1 creates the
+  # CloudFront WebACL inline, any other Region gets one from the us-east-1 edge stack
+  # (edge-waf.yaml). So the Security page's "WAF active" follows EnableWAF alone.
+  WafActive: !Equals [!Ref EnableWAF, 'true']
+
+  # The M2M (client-credentials) client is optional. When configured, it is admitted
+  # ONLY by the learn-route authorizer, never the main one, so a user-less machine
+  # token cannot reach any route other than POST /api/learn.
+  HasM2MClient: !Not [!Equals [!Ref M2MClientId, '']]
+  # Batch wiring is optional — both parameters default to ''. When unset, the
+  # batch:SubmitJob statement below is omitted entirely (Fn::If -> AWS::NoValue) rather
+  # than falling back to Resource '*'. So a no-batch deploy still succeeds, but with no
+  # SubmitJob grant at all instead of an account-wide one.
+  HasBatchJobs: !And
+    - !Not [!Equals [!Ref BatchJobQueue, '']]
+    - !Not [!Equals [!Ref BatchJobDefinition, '']]
+  # The audit vault grants exist only when the storage stack passed a bucket name.
+  HasAuditBucket: !Not [!Equals [!Ref AuditBucketName, '']]
+  # The audit alarms notify the deployment's topic when one is wired.
+  HasNotificationTopic: !Not [!Equals [!Ref NotificationTopicArn, '']]
+
+Resources:
+  # ── ECS Cluster ──
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${ResourcePrefix}-api'
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      # Container Insights (CKV_AWS_65) — per-task CPU/memory/network metrics, which
+      # is what you need to size Fargate and to see a task thrashing before it fails
+      # a health check. Bills as CloudWatch custom metrics, so it is not free.
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # ── IAM Role for ECS Task ──
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              Wildcards are read-only describe actions (rds/ec2, no
+              resource-level support), customer-provided secret ARNs, customer
+              cross-account roles, dynamic cross-account VPC networking, and
+              managed Bedrock/SNS/rds-data targets. DynamoDB, S3, and iam:PassRole
+              (service-conditioned) are already constrained; no unconstrained
+              IAM-management.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "Describe-only + customer-arbitrary ARNs + dynamic cross-account network resources; DynamoDB/S3/PassRole already scoped."
+          - id: CKV_AWS_107
+            comment: "secretsmanager:GetSecretValue targets customer-provided secret ARNs."
+          - id: CKV_AWS_108
+            comment: "No exfiltration path; data writes are confined to the scoped DynamoDB tables, the reports bucket and the write-once audit vault bucket (PutObject only, no delete or lock-configuration verbs)."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-spaces'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-network'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-network/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-investigations'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-investigations/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-recommendations'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-recommendations/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-sessions'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-user-knowledge'
+                  # Per-caller rate-limit counters. UpdateItem (already in the
+                  # action list) increments the window; the limiter fails open if denied.
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-rate-limits'
+              # The governance audit table is deliberately append-only for this role:
+              # it can write index rows and read them back for the console's audit view
+              # (Query on the base table and its month-index), but cannot alter or
+              # delete them. Sharing the statement above would mean the same credential
+              # that writes the audit trail could erase it, so anything that reached
+              # this task could delete the record of what it did. Nothing needs the
+              # omitted verbs: audit_log.write_event only ever calls put_item, the
+              # reads are paged Query calls (no Scan), the table carries no TTL so no
+              # retention sweep touches it, and the email-sender function in
+              # storage.yaml is already granted PutItem alone against the same table.
+              # The record itself is the vault object (AuditVaultAccess); this table
+              # is its index.
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-audit'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-audit/index/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject   # remove custom knowledge docs (account/space/user)
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ReportsS3Bucket}'
+                  - !Sub 'arn:aws:s3:::${ReportsS3Bucket}/*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                # Narrowed from '*' to two patterns, both in THIS account:
+                #  - <ResourcePrefix>/* : customer read-only DB secrets (same convention
+                #    the app's own per-space access-role policy emits). Cross-account
+                #    customer secrets are read via the assumed discovery role (scoped
+                #    to the same prefix in the member account), NOT this task role.
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:${ResourcePrefix}/*'
+              # Scoped to this deployment's own queue and job definition; master passes
+              # both as ARNs. Scoping to specific ARNs rather than Resource: '*' keeps a
+              # compromised task from submitting jobs against any queue or job definition
+              # in the account — and, since a job's parameters carry the secret ARN and
+              # cross-account role it will use, confines parameter tampering to this
+              # deployment's databases rather than anything in the account.
+              # Present only when batch is configured; scoped to this deployment's queue
+              # and job definition. When batch is disabled the whole statement is omitted
+              # (no Resource '*' fallback — there is nothing to submit to anyway).
+              - !If
+                - HasBatchJobs
+                - Effect: Allow
+                  Action:
+                    - batch:SubmitJob
+                  Resource:
+                    - !Ref BatchJobQueue
+                    - !Ref BatchJobDefinition
+                - !Ref AWS::NoValue
+              # Neither of these supports resource-level permissions, so '*' is the
+              # only scope AWS accepts. ListJobs authorises against '*' even though
+              # the call names a jobQueue, and a job ARN only exists after
+              # submission. Scoping either to the queue does not narrow anything —
+              # it denies the action outright, which is how the console's scan
+              # history silently emptied: it caught the AccessDeniedException and
+              # rendered no rows while the scans themselves ran fine. SubmitJob
+              # above is the statement that provides containment; these two are
+              # read-only over this account's own Batch jobs.
+              - Effect: Allow
+                Action:
+                  - batch:ListJobs
+                  - batch:DescribeJobs
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                Resource: '*'
+              # Only the two EventBridge Scheduler runner roles this deployment hands to
+              # Scheduler (the tier-1 collector and tier-2 scan-trigger roles), not any
+              # role. Both arrive as parameters from the agent stack's outputs.
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource:
+                  - !Ref SchedulerRoleArn
+                  - !Ref Tier1SchedulerRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: scheduler.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  # Guardrail application shares the '*' resource of the model-invoke
+                  # actions above. Scoping it to the guardrail ARN would be tighter,
+                  # but the guardrail is created in a sibling stack and its identifier
+                  # arrives as a parameter that may be empty on a partial deploy.
+                  - bedrock:ApplyGuardrail
+                  # Discovery for model governance (read-only; no resource-level form)
+                  - bedrock:ListInferenceProfiles
+                  - bedrock:ListFoundationModels
+                  - bedrock:GetInferenceProfile
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+              # NOTE: the admin-console "operational settings" writes — cost budget,
+              # guardrail-alarm thresholds, database alarms, and the test-email notifier
+              # invoke — live in the OperationalSettingsAccess managed policy attached to
+              # this role, to keep this inline policy under IAM's 10,240-byte limit.
+              # The metrics store, READ side. The API reads the two record tables and the
+              # CloudWatch series; it holds no write on either (the collectors write), so
+              # a compromised task cannot forge or erase collection history. GetMetricData
+              # has no resource-level scoping; the namespace is fixed server-side and the
+              # query is built from scoped instance ids, never from caller input.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier1MetricsTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier2ScansTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier2ScansTable}/index/*'
+              - Effect: Allow
+                Action: cloudwatch:GetMetricData
+                Resource: '*'          # no resource-level form for this action
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBSubnetGroups
+                  - rds:DescribeGlobalClusters
+                  - sts:GetCallerIdentity
+                Resource: '*'          # describe/list/whoami — no resource-level form
+              # Cross-account assume is scoped to this deployment's own role namespaces
+              # — <ResourcePrefix>-* covers both the discovery roles and the
+              # per-space access roles — rather than any role in any account.
+              #
+              # It is scoped by role NAME across accounts, not to specific accounts,
+              # because the set of member accounts is not known when this stack is
+              # created. An sts:ExternalId condition would additionally bind each
+              # assumption to a secret the caller must know, which is the standard
+              # answer to the confused-deputy problem. It is not applied here: the
+              # target role has to trust this account before it can be assumed at all,
+              # and both accounts belong to the same organisation, so the residual is
+              # lateral movement within one estate rather than access across unrelated
+              # customers. Adding it is a three-sided change — this policy, the
+              # member-account role's trust policy, and every assume_role call site —
+              # where applying one side alone breaks cross-account access outright.
+              # See docs/ARCHITECTURE.md#accepted-threats.
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub 'arn:aws:iam::*:role/${ResourcePrefix}-*'
+              # EC2 network create/delete is tag-gated on ManagedBy, mirroring the
+              # member-account role (secondaryAccountPolicy in SpaceDetail.jsx, pinned by
+              # tests/test_secondary_role_policy.py and tests/test_task_role_network_policy.py).
+              # The runtime (backend/tools/aws/network_client.py) stamps ManagedBy at create
+              # time on every peering connection, VPC endpoint and security group, so a
+              # RequestTag condition cannot block live onboarding; deletes act on resources
+              # that carried the tag from create, so ResourceTag matches at teardown.
+              #
+              # Left UNCONDITIONED and documented residuals: the VPC leg of
+              # CreateSecurityGroup (a VPC cannot carry a request tag — conditioning it would
+              # deny every SG create), CreateRoute/DeleteRoute/ReplaceRoute (a route is not a
+              # taggable resource, so no condition key — kept with its compensating controls),
+              # AuthorizeSecurityGroupIngress/RevokeSecurityGroupIngress (contained by the
+              # explicit ALB/VPC-Link Deny below), AcceptVpcPeeringConnection and
+              # ModifyVpcPeeringConnectionOptions (accept/options side, mirrors
+              # NetworkPeeringAccept), and all Describe* reads (no resource-level/tag form).
+              - Effect: Allow
+                Action:
+                  - ec2:AcceptVpcPeeringConnection
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:ModifyVpcPeeringConnectionOptions
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:ReplaceRoute
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:DescribeVpcEndpoints
+                Resource: '*'
+              # Create of a taggable network resource: conditioned on the ManagedBy tag the
+              # create call stamps (aws:RequestTag/ManagedBy).
+              - Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                Resource: 'arn:aws:ec2:*:*:security-group/*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+              # The VPC leg of CreateSecurityGroup — unconditioned: a VPC cannot carry a
+              # request tag, so conditioning it would deny every SG create. Inert without the
+              # tagged security-group leg above.
+              - Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                Resource: 'arn:aws:ec2:*:*:vpc/*'
+              # ec2:CreateVpcPeeringConnection / ec2:CreateVpcEndpoint each need TWO
+              # statements (a tag-conditioned taggable leg + an unconditioned vpc/subnet/sg
+              # leg), and this role's inline policies are at the IAM 10,240-byte aggregate
+              # limit. So those two statements live in the ECSTaskNetworkCreate managed
+              # policy (below), which has a budget of its own. CreateTags (tag-on-create)
+              # and the deletes (ResourceTag-gated) stay here.
+              # CreateTags pinned to tag-on-create (ec2:CreateAction) AND the ManagedBy value,
+              # so the role cannot stamp ManagedBy onto a pre-existing customer resource and
+              # then mutate or delete it under the ResourceTag statements. Mirrors
+              # Ec2TagOnCreate (tests/test_secondary_role_policy.py
+              # test_create_tags_cannot_be_used_to_self_grant).
+              - Effect: Allow
+                Action:
+                  - ec2:CreateTags
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+                  StringLike:
+                    ec2:CreateAction:
+                      - CreateSecurityGroup
+                      - CreateVpcPeeringConnection
+                      - CreateVpcEndpoint
+              # Delete of a taggable network resource: conditioned on the ManagedBy tag the
+              # resource carried from create (aws:ResourceTag/ManagedBy).
+              - Effect: Allow
+                Action:
+                  - ec2:DeleteVpcPeeringConnection
+                  - ec2:DeleteVpcEndpoints
+                  - ec2:DeleteSecurityGroup
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+              # Same-region databases whose VPC CIDR is already routed to another VPC are
+              # reached over a VPC Lattice resource endpoint instead of peering. The
+              # provider half (resource gateway + configuration in the database VPC, RAM
+              # share) runs in the database account through the member role, or here when
+              # the database is in this account; the consumer half (accepting the share,
+              # the resource VPC endpoint above) always runs here. The network-interface
+              # actions are in their own statement below.
+              #
+              # Read-only Lattice/RAM here (no resource-level form), plus the consumer-side
+              # accept: the share invitation is created in the member account and carries no
+              # tag of ours, so AcceptResourceShareInvitation cannot be ManagedBy-conditioned
+              # (a documented residual, like NetworkPeeringAccept on the member policy). The
+              # MUTATING Lattice/RAM creates, deletes and tag-on-create are tag-gated in the
+              # ECSTaskNetworkCreate managed policy below; they live there because this inline
+              # policy is at the IAM 10,240-byte limit and a managed policy has its own budget.
+              - Effect: Allow
+                Action:
+                  - vpc-lattice:GetResourceGateway
+                  - vpc-lattice:ListResourceGateways
+                  - vpc-lattice:GetResourceConfiguration
+                  - vpc-lattice:ListResourceConfigurations
+                  - vpc-lattice:ListTagsForResource
+                  - ram:GetResourceShares
+                  - ram:GetResourceShareAssociations
+                  - ram:GetResourceShareInvitations
+                  - ram:AcceptResourceShareInvitation
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+              # The network interfaces of a resource gateway and of a resource endpoint are
+              # created by VPC Lattice, not by this role: tested in a dev account (CloudTrail
+              # shows AWSServiceRoleForVpcLattice, invokedBy vpc-lattice.amazonaws.com, making
+              # every CreateNetworkInterface), the gateway went ACTIVE with these actions
+              # conditioned on aws:ViaAWSService, and a direct ModifyNetworkInterfaceAttribute
+              # or DeleteNetworkInterface by the role was denied. So the role may touch an ENI
+              # only when an AWS service calls on its behalf. Pinned by
+              # tests/test_task_role_eni_guard.py.
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:CreateNetworkInterfacePermission
+                  - ec2:DeleteNetworkInterface
+                  - ec2:AssignPrivateIpAddresses
+                  - ec2:UnassignPrivateIpAddresses
+                  - ec2:ModifyNetworkInterfaceAttribute
+                Resource: '*'
+                Condition:
+                  Bool:
+                    aws:ViaAWSService: 'true'
+              # the network-configurator legitimately needs SG ingress edits on
+              # PER-DB peering/Lattice groups it creates, hence the '*' above. But it
+              # must NEVER touch the two groups that make "API Gateway is the only way in"
+              # true at the network layer: the ALB group (admits :80 from the VPC Link
+              # alone) and the VPC Link group. An explicit Deny on ingress authorize/revoke
+              # for exactly those two groups closes the SG-widening bypass this finding is
+              # about, while leaving all other per-DB SG edits working. Explicit Deny
+              # overrides the Allow above regardless of ordering. Verified: no code path in
+              # backend/tools/aws/network_client.py edits these two groups.
+              - Effect: Deny
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                Resource:
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${ALBSecurityGroup.GroupId}'
+                  - !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:security-group/${VpcLinkSecurityGroup.GroupId}'
+              # The network-interface Allow above serves VPC Lattice in a DATABASE VPC (and
+              # only on service-forwarded calls). Nothing of ours ever deletes, modifies or
+              # unassigns addresses on an interface in the agent's own private subnets
+              # (the code never calls the ENI APIs), and those interfaces are the ALB, the
+              # interface VPC endpoints and the tasks themselves. This Deny protects them
+              # from the role's own direct calls. aws:ViaAWSService=false keeps it off
+              # calls an AWS service makes for us (CreateVpcEndpoint / DeleteVpcEndpoints
+              # add and remove resource-endpoint interfaces in these subnets). The subnet
+              # ARNs are built from SubnetIds with literal delimiters (Fn::Join takes no
+              # function as its delimiter), so Region and account are wildcards; a subnet
+              # id is unique on its own. Pinned by tests/test_task_role_eni_guard.py.
+              - Effect: Deny
+                Action:
+                  - ec2:DeleteNetworkInterface
+                  - ec2:ModifyNetworkInterfaceAttribute
+                  - ec2:UnassignPrivateIpAddresses
+                Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+                Condition:
+                  ArnLike:
+                    ec2:Subnet: !Split [',', !Join ['', ['arn:aws:ec2:*:*:subnet/', !Join [',arn:aws:ec2:*:*:subnet/', !Ref SubnetIds]]]]
+                  Bool:
+                    aws:ViaAWSService: 'false'
+              # Account-wide read/discovery APIs. These do not support
+              # resource-level scoping (CloudWatch/PI metrics, CloudTrail
+              # LookupEvents, Logs Insights, Resource Explorer), so '*' is required.
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DescribeAlarmsForMetric
+                  - pi:GetResourceMetrics
+                  - pi:DescribeDimensionKeys
+                  - pi:GetDimensionKeyDetails
+                  - cloudtrail:LookupEvents
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - resource-explorer-2:Search
+                  - resource-explorer-2:ListIndexes
+                  - resource-explorer-2:GetIndex
+                  - resource-explorer-2:CreateIndex
+                  - resource-explorer-2:UpdateIndexType
+                Resource: '*'
+              # IAM role management scoped to the product's own role namespace
+              # (<ResourcePrefix>-agent-*) — the agent provisions per-space access
+              # roles. CreateRole additionally REQUIRES the AgentRoleBoundary permissions
+              # boundary, because CreateRole + PutRolePolicy + AssumeRole on the same
+              # prefix is otherwise a privilege-escalation chain to account admin. The
+              # boundary caps every provisioned role's EFFECTIVE permissions to the intended
+              # data-plane read set, regardless of the inline policy attached below — so even
+              # an attacker with code-exec in the task cannot mint an admin role.
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ResourcePrefix}-agent-*'
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Ref AgentRoleBoundary
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:TagRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ResourcePrefix}-agent-*'
+              # PutRolePolicy only onto a role that already carries the boundary, so a
+              # boundary-less role in the namespace cannot be handed an inline policy.
+              - Effect: Allow
+                Action:
+                  - iam:PutRolePolicy
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ResourcePrefix}-agent-*'
+                Condition:
+                  StringEquals:
+                    iam:PermissionsBoundary: !Ref AgentRoleBoundary
+              # Cognito admin actions scoped to THIS deployment's user pool only,
+              # not every pool in the account.
+              - Effect: Allow
+                Action:
+                  - cognito-idp:ListUsers
+                  - cognito-idp:ListGroups
+                  - cognito-idp:CreateGroup
+                  - cognito-idp:GetGroup
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminRemoveUserFromGroup
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:ListUsersInGroup
+                  # Revoke every session of a user whose role changed (token lifecycle).
+                  - cognito-idp:AdminUserGlobalSignOut
+                  # Email-sender feature: read the pool config and switch its
+                  # EmailConfiguration to a verified SES sender at runtime.
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:UpdateUserPool
+                  # UpdateUserPool cannot carry the MFA FACTOR configuration, so
+                  # apply_to_pool reads it before the update and re-asserts it after.
+                  # Without these the pool could be left on "MFA required" with no
+                  # enrolled factor. Both are scoped to this deployment's pool.
+                  - cognito-idp:GetUserPoolMfaConfig
+                  - cognito-idp:SetUserPoolMfaConfig
+                Resource:
+                  - !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}'
+              # Amazon SES (email-sender settings + invite recipient verification):
+              # create/read identities, and DELETE+recreate an UNVERIFIED identity —
+              # SESv2's only way to re-send an expired verification email (the
+              # app only deletes identities that are not yet verified). Identity
+              # actions are scoped to this account/region's identities; GetAccount
+              # and ListEmailIdentities (used to batch per-user verification checks
+              # on the Users tabs) have no resource-level form, so they use '*'
+              # (documented W11-style accept).
+              - Effect: Allow
+                Action:
+                  - ses:GetEmailIdentity
+                  - ses:CreateEmailIdentity
+                  - ses:DeleteEmailIdentity
+                Resource:
+                  - !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+              - Effect: Allow
+                Action:
+                  - ses:GetAccount
+                  - ses:ListEmailIdentities
+                Resource: '*'
+              # Cognito creates the email.cognito-idp.amazonaws.com service-linked
+              # role the FIRST time a pool switches to SES (EmailSendingAccount=
+              # DEVELOPER). Scoped by the AWSServiceName condition so the task role
+              # can ONLY create that one SLR, nothing else.
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/email.cognito-idp.amazonaws.com/AWSServiceRoleForAmazonCognitoIdpEmail*'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: email.cognito-idp.amazonaws.com
+              # VPC Lattice creates its AWSServiceRoleForVpcLattice service-linked role
+              # with the CALLER's permissions the first time a Lattice resource is made
+              # in an account (seen in CloudTrail in a dev account: CreateServiceLinkedRole
+              # by the caller, invokedBy vpc-lattice.amazonaws.com). Scoped to that one SLR.
+              - Effect: Allow
+                Action:
+                  - iam:CreateServiceLinkedRole
+                Resource:
+                  - !Sub 'arn:aws:iam::${AWS::AccountId}:role/aws-service-role/vpc-lattice.amazonaws.com/AWSServiceRoleForVpcLattice'
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: vpc-lattice.amazonaws.com
+              # AgentCore Memory data-plane: read conversation events (rehydrate
+              # reopened chats) + list/search/delete long-term memory records
+              # (the Memories UI). Scoped to this deployment's memory resource;
+              # only present when a MemoryId is wired in from the agent stack.
+              - !If
+                - HasMemoryId
+                - Effect: Allow
+                  Action:
+                    - bedrock-agentcore:ListEvents
+                    - bedrock-agentcore:GetEvent
+                    - bedrock-agentcore:ListSessions
+                    - bedrock-agentcore:ListActors
+                    - bedrock-agentcore:ListMemoryRecords
+                    - bedrock-agentcore:RetrieveMemoryRecords
+                    - bedrock-agentcore:GetMemoryRecord
+                    - bedrock-agentcore:DeleteMemoryRecord
+                  Resource:
+                    - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/${MemoryId}'
+                    - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/${MemoryId}/*'
+                - !Ref 'AWS::NoValue'
+        # Replaces CloudWatchLogsFullAccess, which granted logs:* account-wide —
+        # including deleting this application's own CloudTrail and API Gateway
+        # access logs (AwsSolutions-IAM4). No Delete action here; writes are
+        # confined to log groups this deployment owns.
+        - PolicyName: CloudWatchLogsScoped
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Write the API container's own application logs.
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ResourcePrefix}-*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ResourcePrefix}-*:log-stream:*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ResourcePrefix}/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ResourcePrefix}/*:log-stream:*'
+              # Read RDS-published database logs: the same-account fallback in
+              # tools/aws/cloudwatch_logs_client.py, used when a monitored
+              # database sits in the agent's own account and there is no
+              # per-space role to assume. Read-only, RDS log groups only.
+              - Effect: Allow
+                Action:
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:StartQuery
+                  - logs:StopQuery
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/rds/*'
+              # Neither action takes a resource in IAM: DescribeLogGroups is the
+              # discovery call that finds which RDS log groups exist, and
+              # GetQueryResults is keyed on a query id, not a log group.
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:GetQueryResults
+                Resource: '*'
+
+  # The admin audit vault grants of the API task. A managed policy attached to
+  # ECSTaskRole rather than more statements in AppAccess: a role's inline policies
+  # share one 10,240-character IAM budget, which AppAccess nearly fills with a long
+  # ResourcePrefix, while a managed policy has a budget of its own.
+  # Admin-console "operational settings" writes, split out of the inline AppAccess
+  # policy to keep that policy under IAM's 10,240-byte inline limit. All resource-scoped
+  # (budget, named alarms, the notifier function) — no wildcards.
+  OperationalSettingsAccess:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Cost budget, guardrail-alarm thresholds, database alarms and the test-email notifier invoke for the API task (admin-console settings writes).
+      Roles:
+        - !Ref ECSTaskRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Cost budget: read the current limit / month-to-date spend and let a
+          # super admin change the limit from the admin console. Scoped to this
+          # deployment's single budget; alert-only (no CreateBudget — CloudFormation
+          # owns the resource). Budget ARNs are global (no region segment).
+          - Effect: Allow
+            Action:
+              - budgets:ViewBudget
+              - budgets:ModifyBudget
+            Resource: !Sub 'arn:aws:budgets::${AWS::AccountId}:budget/${ResourcePrefix}-monthly-cost-${AWS::Region}'
+          # Guardrail alarm thresholds: let a super admin retune the two alert-only
+          # CloudWatch alarms from the admin console. Reading is covered by the
+          # account-wide cloudwatch:DescribeAlarms grant in AppAccess; the write is scoped
+          # to this deployment's two guardrail alarms (put_metric_alarm is create-or-replace,
+          # so it re-puts the same alarm with a new threshold — it never blocks a call).
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+            Resource:
+              - !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ResourcePrefix}-guardrail-applyguardrail-throttled'
+              - !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ResourcePrefix}-guardrail-interventions-high'
+          # Database alarms (tools/aws/db_alarms.py): the API task keeps one alarm per
+          # monitored database per enabled alarm. Put and delete are scoped to this
+          # install's database-alarm prefix; reconcile never names anything else.
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+            Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ResourcePrefix}-db-*'
+          # Database alarms only notify (product rule 29): EventBridge reads every state
+          # change, so they carry no action. Refuse one outright, so a compromised task
+          # cannot attach an EC2, Systems Manager or Lambda action to an alarm it may put.
+          - Effect: Deny
+            Action: cloudwatch:PutMetricAlarm
+            Resource: !Sub 'arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${ResourcePrefix}-db-*'
+            Condition:
+              ForAnyValue:StringLike:
+                'cloudwatch:AlarmActions': '*'
+          # The console's "Send a test email": invokes the notifier with {"test": true}.
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ResourcePrefix}-alarm-notifier'
+
+  AuditVaultAccess:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Admin audit vault access for the API task (write-once records, raise-only retention, audit metrics).
+      Roles:
+        - !Ref ECSTaskRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # The admin audit vault (storage.yaml AuditBucket, Object Lock COMPLIANCE).
+          # Write and read objects; list so a missing key reads as NoSuchKey and
+          # verify can check a key holds a single version; read the lock
+          # configuration for the Security posture row. No delete, legal-hold,
+          # bypass, lock-configuration, lifecycle or bucket-policy verb: nothing
+          # this task can do removes or weakens a record.
+          - !If
+            - HasAuditBucket
+            - Sid: AuditVaultReadWrite
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:GetObjectVersion
+                - s3:GetObjectRetention
+                - s3:ListBucket
+                - s3:ListBucketVersions
+                - s3:GetBucketObjectLockConfiguration
+              Resource:
+                - !Sub 'arn:aws:s3:::${AuditBucketName}'
+                - !Sub 'arn:aws:s3:::${AuditBucketName}/*'
+            - !Ref AWS::NoValue
+          # A PutObject carrying ObjectLockMode / ObjectLockRetainUntilDate is
+          # authorised as both s3:PutObject and s3:PutObjectRetention, so these
+          # conditions bound every per-object lock the task can set: COMPLIANCE
+          # only, at least the floor, at most 10 years. A GOVERNANCE header or a
+          # date below the floor is refused. A PutObject without lock headers gets
+          # the bucket default (COMPLIANCE, the floor).
+          - !If
+            - HasAuditBucket
+            - Sid: AuditVaultRaiseOnlyRetention
+              Effect: Allow
+              Action: s3:PutObjectRetention
+              Resource: !Sub 'arn:aws:s3:::${AuditBucketName}/*'
+              Condition:
+                StringEquals:
+                  's3:object-lock-mode': COMPLIANCE
+                NumericGreaterThanEquals:
+                  's3:object-lock-remaining-retention-days': !Ref AuditRetentionDays
+                NumericLessThanEquals:
+                  's3:object-lock-remaining-retention-days': 3653
+            - !Ref AWS::NoValue
+          # Audit write-failure and vault-off datapoints for the three audit alarms
+          # below. Only this deployment's own namespace.
+          - Sid: AuditMetrics
+            Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'cloudwatch:namespace': !Sub '${ResourcePrefix}/Audit'
+
+  # Creating a VPC peering connection or a resource endpoint is authorized against the
+  # taggable resource it produces AND the non-taggable resources it also touches (the
+  # requester VPC; and for an endpoint the VPC, subnets and security groups). A VPC/subnet/
+  # SG cannot carry a request tag, so each create needs a tag-conditioned leg plus an
+  # unconditioned leg (exactly like CreateSecurityGroup in AppAccess). The ECSTaskRole
+  # inline policies are at the IAM 10,240-byte aggregate limit, so these two statements ride
+  # in a managed policy with a budget of its own. Delete (ResourceTag-gated) and CreateTags
+  # (tag-on-create only) remain inline in AppAccess, so the self-grant guard is unchanged.
+  ECSTaskNetworkCreate:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Lets the API task create (tag-on-create) the VPC peering connections, resource endpoints and VPC Lattice / RAM resources that onboarding sets up.
+      Roles:
+        - !Ref ECSTaskRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Tag-on-create conditioned on ManagedBy for the taggable resource each create
+          # produces, so delete can only ever touch our own.
+          - Effect: Allow
+            Action:
+              - ec2:CreateVpcPeeringConnection
+              - ec2:CreateVpcEndpoint
+            Resource:
+              - 'arn:aws:ec2:*:*:vpc-peering-connection/*'
+              - 'arn:aws:ec2:*:*:vpc-endpoint/*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+          # The non-taggable legs the same creates are also authorized against. A VPC/subnet/
+          # SG cannot carry a request tag, so unconditioned; inert without the tagged leg.
+          - Effect: Allow
+            Action:
+              - ec2:CreateVpcPeeringConnection
+              - ec2:CreateVpcEndpoint
+            Resource:
+              - 'arn:aws:ec2:*:*:vpc/*'
+              - 'arn:aws:ec2:*:*:subnet/*'
+              - 'arn:aws:ec2:*:*:security-group/*'
+          # VPC Lattice / RAM mutations, tag-gated to resources this product created. The
+          # create calls stamp ManagedBy (network_client passes tags= on create), so
+          # RequestTag gates creation and ResourceTag gates deletion. vpc-lattice:TagResource
+          # is the permission the create's tags= needs, pinned to CreateAction so it cannot
+          # stamp ManagedBy onto a pre-existing resource to unlock the deletes. RAM has no
+          # standalone TagResource grant: the share is tagged by CreateResourceShare itself,
+          # and is pinned to a Lattice resource configuration. Mirrors the member policy
+          # (admin-console SpaceDetail.jsx), pinned by tests/test_secondary_role_policy.py.
+          - Effect: Allow
+            Action:
+              - vpc-lattice:CreateResourceGateway
+              - vpc-lattice:CreateResourceConfiguration
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+          - Effect: Allow
+            Action:
+              - vpc-lattice:TagResource
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+              StringLike:
+                vpc-lattice:CreateAction:
+                  - CreateResourceGateway
+                  - CreateResourceConfiguration
+          - Effect: Allow
+            Action:
+              - vpc-lattice:DeleteResourceGateway
+              - vpc-lattice:DeleteResourceConfiguration
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+          - Effect: Allow
+            Action:
+              - ram:CreateResourceShare
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:RequestTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+                ram:RequestedResourceType: vpc-lattice:ResourceConfiguration
+          - Effect: Allow
+            Action:
+              - ram:DeleteResourceShare
+            Resource: '*'
+            Condition:
+              StringEquals:
+                aws:ResourceTag/ManagedBy: !Sub '${ResourcePrefix}-agent'
+
+  # ── ECS Task Definition ──
+  # Permissions boundary for agent-provisioned <ResourcePrefix>-agent-* roles.
+  # Mirrors the app's AGENT_SPACE_PERMISSIONS_POLICY (the intended per-space read set).
+  # CreateRole above requires this ARN as the boundary, so a provisioned role's effective
+  # permissions can never exceed this set — closing the create+attach+assume escalation.
+  AgentRoleBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub '${AWS::StackName}-agent-boundary'
+      Description: Effective-permission ceiling for agent-provisioned <ResourcePrefix>-agent-* roles.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - rds:DescribeDBClusters
+              - rds:DescribeDBInstances
+              - rds:DescribeDBSubnetGroups
+              - rds:DescribeGlobalClusters
+              - cloudwatch:GetMetricStatistics
+              - cloudwatch:GetMetricData
+              - cloudwatch:DescribeAlarms
+              - pi:GetResourceMetrics
+              - pi:DescribeDimensionKeys
+              - cloudtrail:LookupEvents
+              - logs:FilterLogEvents
+              - logs:DescribeLogGroups
+              - logs:StartQuery
+              - logs:GetQueryResults
+              - resource-explorer-2:Search
+              - resource-explorer-2:ListIndexes
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: !Sub 'arn:aws:secretsmanager:*:*:secret:${ResourcePrefix}/*'
+
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${ResourcePrefix}-api'
+      Cpu: '512'
+      Memory: '1024'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: api
+          Image: !Ref ContainerImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: REPORTS_S3_BUCKET
+              Value: !Ref ReportsS3Bucket
+            - Name: RESOURCE_PREFIX
+              Value: !Ref ResourcePrefix
+            - Name: DB_CONFIG_TABLE
+              Value: !Ref DbConfigTable
+            - Name: AGENT_MODEL_ID
+              Value: !Ref AgentModelId
+            - Name: GUARDRAIL_ID
+              Value: !Ref GuardrailId
+            - Name: GUARDRAIL_VERSION
+              Value: !Ref GuardrailVersion
+            - Name: GUARDRAIL_INPUT_ID
+              Value: !Ref InputGuardrailId
+            - Name: GUARDRAIL_INPUT_VERSION
+              Value: !Ref InputGuardrailVersion
+            - Name: JWT_SIGNATURE_VERIFICATION
+              Value: !Ref JwtSignatureVerification
+            - Name: GUARDRAIL_ENFORCE
+              Value: !Ref GuardrailEnforce
+            - Name: SAME_REGION_CONNECTIVITY
+              Value: !Ref SameRegionConnectivity
+            - Name: DB_PORT_RANGE
+              Value: !Ref DbPortRange
+            - Name: AGENT_ROLE_BOUNDARY_ARN
+              Value: !Ref AgentRoleBoundary
+            - Name: NOTIFICATION_TOPIC_ARN
+              Value: !Ref NotificationTopicArn
+            - Name: ALARM_EMAIL_RECIPIENT
+              Value: !Ref AlarmEmailRecipient
+            # Admin audit vault (tools/aws/audit_log.py). AUDIT_VAULT_DEFAULT is the
+            # switch until a super admin first sets it in the console;
+            # AUDIT_RETENTION_FLOOR matches the IAM floor above; this task (only) may
+            # lock a record longer than the floor.
+            - Name: AUDIT_BUCKET
+              Value: !Ref AuditBucketName
+            - Name: AUDIT_VAULT_DEFAULT
+              Value: !Ref AuditVault
+            - Name: AUDIT_RETENTION_FLOOR
+              Value: !Ref AuditRetentionDays
+            - Name: AUDIT_EXTEND_RETENTION
+              Value: 'true'
+            - Name: BUDGET_NAME
+              Value: !Sub '${ResourcePrefix}-monthly-cost-${AWS::Region}'
+            - Name: BATCH_JOB_QUEUE
+              Value: !Ref BatchJobQueue
+            - Name: BATCH_JOB_DEFINITION
+              Value: !Ref BatchJobDefinition
+            - Name: AGENT_VPC_ID
+              Value: !Ref AgentVpcId
+            - Name: AGENT_VPC_CIDR
+              Value: !Ref AgentVpcCidr
+            - Name: AGENT_PRIVATE_ROUTE_TABLE_ID
+              Value: !Ref PrivateRouteTableId
+            # The host-route repair loop (app._start_route_repair_loop) runs in this
+            # task only: it holds the route permissions above. The agent runtime runs
+            # the same image without this setting and never repairs routes.
+            - Name: ROUTE_REPAIR_LOOP
+              Value: enabled
+            - Name: AGENT_PRIVATE_SECURITY_GROUP_ID
+              Value: !Ref PrivateSecurityGroupId
+            - Name: USER_POOL_ID
+              Value: !Ref UserPoolId
+            # the app clients a bearer may be bound to. When set, the in-app
+            # verifier rejects a token whose aud/client_id is neither of these (an
+            # otherwise-valid Cognito token minted for a different pool client).
+            - Name: WEB_CLIENT_ID
+              Value: !Ref WebClientId
+            - Name: M2M_CLIENT_ID
+              Value: !Ref M2MClientId
+            # Pins the service principal to one scope. Unset, is_m2m_principal()
+            # accepts any user-less scoped token, and it is the only authorization on
+            # /api/learn. Must match M2M_SCOPE in backend/template.yaml and the
+            # cognito.yaml resource server; the guard test checks all three.
+            - Name: M2M_ALLOWED_SCOPES
+              Value: agent-platform-id/service
+            - Name: SCAN_TRIGGER_LAMBDA_ARN
+              Value: !Ref ScanTriggerLambdaArn
+            - Name: SCHEDULER_ROLE_ARN
+              Value: !Ref SchedulerRoleArn
+            - Name: SCAN_SCHEDULER_DLQ_ARN
+              Value: !Ref ScanSchedulerDlqArn
+            - Name: TIER1_COLLECTOR_LAMBDA_ARN
+              Value: !Ref Tier1CollectorLambdaArn
+            - Name: TIER1_SCHEDULER_ROLE_ARN
+              Value: !Ref Tier1SchedulerRoleArn
+            - Name: RECOMMENDATIONS_TABLE
+              Value: !Sub '${ResourcePrefix}-recommendations'
+            - Name: TIER1_METRICS_TABLE
+              Value: !Ref Tier1MetricsTable
+            - Name: TIER2_SCANS_TABLE
+              Value: !Ref Tier2ScansTable
+            - Name: CW_METRICS_NAMESPACE
+              Value: !Sub '${ResourcePrefix}/Metrics'
+            - Name: ARTIFACTS_VERSION
+              Value: !Ref ArtifactsVersion
+            - Name: ENABLE_WAF
+              Value: !If [WafActive, 'true', 'false']
+            - Name: ENABLE_CLOUDTRAIL
+              Value: !Ref EnableCloudTrail
+            - Name: MEMORY_ID
+              Value: !Ref MemoryId
+            - Name: STACK_NAME
+              Value: !Ref RootStackName
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: api
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${ResourcePrefix}-api'
+      RetentionInDays: 14
+
+  # ── Security Groups ──
+  # Declared in dependency order: the VPC Link group is the source the ALB group
+  # admits, and the ALB group is the source the ECS group admits.
+  #
+  # The VPC Link gets its OWN group rather than sharing the VPC-wide private group
+  # (whose own description is "Private workloads (AgentCore, ECS, Batch)"). API
+  # Gateway is the only sanctioned route to this ALB — every request is meant to
+  # flow API GW -> VPC Link -> ALB -> ECS — and the backend depends on that: the
+  # Cognito authorizer on the API is what verifies bearer-token signatures, while
+  # the in-app group checks (is_admin and friends, see backend/utils/auth.py) read
+  # the resulting claims without re-verifying them. A dedicated group is what makes
+  # "API Gateway is the only way in" true at the network layer rather than merely
+  # intended.
+  VpcLinkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: API Gateway VPC Link to the internal ALB
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (explicit; matches default allow-all)
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-vpclink-sg'
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB for DB Optimization API
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Only the API Gateway VPC Link may reach the ALB. Admitting the VPC Link SG
+        # alone — rather than the whole VPC CIDR — keeps any other workload in the VPC,
+        # the Batch scan container included (it parses untrusted output from customer
+        # databases), from reaching the backend without traversing the API Gateway
+        # Cognito authorizer and presenting group claims that nothing has verified.
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref VpcLinkSecurityGroup
+          Description: API Gateway VPC Link to ALB
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (explicit; matches default allow-all)
+
+  ECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS tasks for DB Optimization API
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: ALB to ECS on port 8080
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AgentVpcCidr
+          Description: VPC endpoints HTTPS
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (explicit; matches default allow-all)
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      LoadBalancerAttributes:
+        # Drop malformed/invalid HTTP headers at the ALB (CKV_AWS_131). Pure
+        # hardening — legitimate clients send well-formed headers, so no
+        # functional change.
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: 'true'
+        # NOTE: ALB access logging (CKV_AWS_91 / W52) is intentionally NOT
+        # enabled here. This ALB is internal and sits entirely behind API
+        # Gateway (every request flows API GW → VPC Link → ALB), and the API
+        # Gateway stage access logs (added above) already capture source IP,
+        # method, route, status and latency for every request. ALB→S3 logging
+        # would be redundant and requires region-specific log-delivery setup.
+        # See docs/ARCHITECTURE.md#security-model for the accepted-with-
+        # justification rationale.
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 8080
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /ping
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ── ECS Service ──
+  ECSService:
+    Type: AWS::ECS::Service
+    # AuditVaultAccess: the first audited action must find the vault grants attached.
+    DependsOn:
+      - ALBListener
+      - AuditVaultAccess
+    Properties:
+      ServiceName: !Sub '${ResourcePrefix}-api'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref ECSTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups:
+            # ECSSecurityGroup: ALB -> task ingress on 8080.
+            # PrivateSecurityGroupId: the shared private SG the agent workloads use to
+            # reach the monitored databases (peering and Lattice paths admit it). The
+            # metrics store itself (DynamoDB, CloudWatch) needs no network placement.
+            - !Ref ECSSecurityGroup
+            - !Ref PrivateSecurityGroupId
+      LoadBalancers:
+        - ContainerName: api
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ── API Gateway ──
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ResourcePrefix}-api'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: !Ref AllowedCorsOrigins
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Amzn-Bedrock-AgentCore-Runtime-Session-Id
+        MaxAge: 86400
+
+  # Main authorizer for the data API. Audience is the WEB client only, so a token
+  # minted for the M2M (client-credentials) client — which carries no user and no MFA —
+  # is rejected on every GET/POST/PUT/DELETE /{proxy+} route. The M2M client reaches the
+  # API only through LearnJwtAuthorizer on the single learn route.
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      Name: CognitoJWT
+      JwtConfiguration:
+        Audience:
+          - !Ref WebClientId
+        Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}'
+
+  # Authorizer for the Learning Agent route only. Admits the M2M client (when
+  # configured) alongside the web client, so the machine token is confined to
+  # POST /api/learn/{proxy+} and cannot reach the rest of the API. Web tokens are
+  # still accepted here, so an admin can exercise the route too.
+  LearnJwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      IdentitySource:
+        - $request.header.Authorization
+      Name: CognitoJWTLearn
+      JwtConfiguration:
+        Audience: !If
+          - HasM2MClient
+          - [!Ref WebClientId, !Ref M2MClientId]
+          - [!Ref WebClientId]
+        Issuer: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}'
+
+  ALBIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !GetAtt ALBListener.ListenerArn
+      IntegrationMethod: ANY
+      ConnectionType: VPC_LINK
+      ConnectionId: !Ref VpcLink
+      PayloadFormatVersion: '1.0'
+      TimeoutInMillis: 29000
+      # Request id and caller IP for the admin audit record. `overwrite:` replaces any
+      # value the client sent, and the same requestId is in the API access log. The
+      # fields are informational: something already inside the VPC could reach the
+      # internal ALB with forged headers (it would still need a valid bearer).
+      RequestParameters:
+        'overwrite:header.x-dbops-request-id': '$context.requestId'
+        'overwrite:header.x-dbops-client-ip': '$context.identity.sourceIp'
+
+  VpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub '${ResourcePrefix}-vpc-link'
+      SubnetIds: !Ref SubnetIds
+      # Dedicated group, not the shared private group — see VpcLinkSecurityGroup.
+      # CloudFormation cannot update a VPC Link's security groups in place, so this
+      # replaces the VPC Link: allow a few minutes and expect the API to be briefly
+      # unavailable mid-update.
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+
+  ApiRouteGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  ApiRoutePost:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  # Explicit route for the one REST endpoint that invokes a model per call. It is
+  # otherwise served by the POST catch-all above; declaring it explicitly (same
+  # integration + authorizer, so behaviour is identical) lets the stage attach a tighter
+  # per-route throttle below the deployment-wide default, so this model-invoking route
+  # cannot be hammered on the shared ceiling. The per-caller counter in the app is the
+  # complementary control.
+  CompareSummaryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /api/reports/compare-summary'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  ApiRoutePut:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'PUT /{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  ApiRouteDelete:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'DELETE /{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  PingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /ping'
+      AuthorizationType: NONE
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  # Learning Agent route — called by the Learning Agent Lambda (SNS-triggered)
+  # using a Cognito M2M (client-credentials) bearer token. It uses the dedicated
+  # LearnJwtAuthorizer, the ONLY authorizer whose audience admits the M2M client, so
+  # the machine token is confined to this route and cannot reach any other.
+  LearnRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /api/learn/{proxy+}'
+      AuthorizationType: JWT
+      AuthorizerId: !Ref LearnJwtAuthorizer
+      Target: !Sub 'integrations/${ALBIntegration}'
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/${ResourcePrefix}/apigw/${AWS::StackName}/access'
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    # RouteSettings below names a route by its string key, which CloudFormation does not
+    # read as a dependency, while API Gateway checks the key against the routes that
+    # exist when the stage is created. Without this the stage and the route can be
+    # created in parallel on a fresh stack, and a stage that lands first fails with
+    # "Unable to find Route by key". Every route is listed so a future per-route
+    # throttle cannot reintroduce the race.
+    DependsOn:
+      - ApiRouteGet
+      - ApiRoutePost
+      - CompareSummaryRoute
+      - ApiRoutePut
+      - ApiRouteDelete
+      - PingRoute
+      - LearnRoute
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      # Stage-wide request throttle: caps total requests/second (with burst
+      # headroom) so a flood or runaway loop is shed as 429 while normal use
+      # stays under the ceiling. Both limits are deploy parameters.
+      DefaultRouteSettings:
+        ThrottlingRateLimit: !Ref ApiThrottleRateLimit
+        ThrottlingBurstLimit: !Ref ApiThrottleBurstLimit
+      # Tighter per-route throttle for the one REST route that invokes a model per call
+      #. Conservative fixed values well below the stage default: a report-summary is
+      # a deliberate, occasional action, so a low rate with small burst sheds abuse of the
+      # model-invoking route without affecting normal use. Requires the explicit
+      # CompareSummaryRoute above.
+      RouteSettings:
+        'POST /api/reports/compare-summary':
+          ThrottlingRateLimit: 2
+          ThrottlingBurstLimit: 5
+      # Access logging (CKV_AWS_95 / W46). JSON-structured per-request log to
+      # CloudWatch; customers can subscribe this group to Datadog/Splunk.
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integration.error"}
+
+  # ── Admin audit alarms ──
+  # Datapoints come from audit_log.write_event (namespace <prefix>/Audit, no
+  # dimensions), so API and runtime datapoints share one alarm. Shaped like
+  # LearningAgentDLQAlarm in backend/template.yaml: notify the topic when one is wired,
+  # and treat missing data as OK so a quiet period is not an alarm. No OKActions, so a
+  # quiet day after an alarm sends nothing.
+  AuditVaultWriteFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-audit-vault-write-failed'
+      AlarmDescription: >-
+        An admin action completed but its record could not be written to the vault.
+        The event shows "Not in vault"; search the API log for AUDIT_VAULT_WRITE_FAILED
+        / AUDIT_VAULT_MISCONFIGURED.
+      Namespace: !Sub '${ResourcePrefix}/Audit'
+      MetricName: VaultWriteFailures
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  AuditIndexWriteFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-audit-index-write-failed'
+      AlarmDescription: >-
+        An audit index row was not written. Search the logs for
+        AUDIT_INDEX_WRITE_FAILED / AUDIT_INDEX_BUDGET_EXCEEDED.
+      Namespace: !Sub '${ResourcePrefix}/Audit'
+      MetricName: IndexWriteFailures
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  # Fires however the switch was flipped, including a direct write to the config item.
+  # CloudWatch notifies on a state change only: when the vault starts recording
+  # index-only, and again after a day with no audited actions.
+  AuditVaultOffAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-audit-vault-off'
+      AlarmDescription: >-
+        Admin actions are being recorded index-only and are not tamper-proof. A super
+        admin can switch the vault on in Settings > Audit.
+      Namespace: !Sub '${ResourcePrefix}/Audit'
+      MetricName: VaultOff
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+Outputs:
+  # This role assumes the customer-installed discovery role for the access pre-flight in
+  # POST /api/spaces/{id}/configure-access. Include it alongside the agent stack's
+  # AssumeRolePrincipalArns when narrowing the member-account role's trust policy.
+  ApiTaskRoleArn:
+    Description: ECS task role ARN (assumes the cross-account discovery role)
+    Value: !GetAtt ECSTaskRole.Arn
+
+  ApiUrl:
+    Description: API Gateway URL for REST API
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+
+  ALBDnsName:
+    Description: ALB DNS name
+    Value: !GetAtt ALB.DNSName
+
+  ECSClusterName:
+    Description: ECS Cluster name
+    Value: !Ref ECSCluster
+
+  ECSServiceName:
+    Description: ECS Service name
+    Value: !GetAtt ECSService.Name

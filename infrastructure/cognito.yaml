@@ -1,0 +1,507 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Cognito User Pool for DB Optimization Agent authentication
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, Aurora cluster identifiers and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  FrontendUrl:
+    Type: String
+    Default: ''
+    Description: >
+      CloudFront URL of the operator app. Registered as an OAuth callback and logout
+      URL; sign-in fails with redirect_mismatch if it is not. master.yaml supplies it
+      from FrontendStack's output - the SPA stacks do not reference Cognito, so there
+      is no dependency cycle and no post-deploy CLI patching is needed.
+  AdminUrl:
+    Type: String
+    Default: ''
+    Description: >
+      CloudFront URL of the admin console, registered the same way as FrontendUrl.
+      Supplied by master.yaml from AdminConsoleStack's output.
+  RefreshTokenValidityDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 3650
+    Description: >
+      How long a refresh token stays valid, in days, before the user must sign in
+      again. Shorter is safer: it bounds how long a stolen refresh token (both SPAs
+      hold theirs in localStorage) can be used. Logout and a privilege change revoke
+      the token immediately regardless; this caps the window when neither happens.
+      Access and id tokens are fixed at 60 minutes. A super admin adjusts this at
+      deploy time (make config / deploy.config); changing it takes effect on the next
+      deploy and applies to refresh tokens issued after it.
+  InitialAdminEmail:
+    Type: String
+    Default: ''
+    Description: >
+      Email address for the initial admin user. A Cognito user is created on
+      stack Create with this email and added to the admins group. Cognito
+      sends a welcome email with a temporary password. Leave blank to skip.
+    AllowedPattern: '^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|)$'
+  InitialAdminName:
+    Type: String
+    Default: ''
+    Description: >
+      Display name for the initial admin user (optional). Set as the Cognito
+      `name` attribute so the app greets them by name. Only applied when the
+      admin user is first created.
+  AppName:
+    Type: String
+    Default: 'DBOps Agent (Beta)'
+    Description: >
+      Product display name used in the invite email. Set by the distribution
+      pipeline at deploy; not intended for customers to change.
+  AuthRateLimitPerIp:
+    Type: Number
+    Default: 1000
+    MinValue: 100
+    MaxValue: 20000000
+    Description: >
+      Sign-in attempts allowed per source IP per five minutes before AWS WAF
+      blocks. Counts only credential submissions (see AuthRateLimit), so it
+      scales with people rather than page weight: a simultaneous sign-in by 100
+      users costs roughly 200. Raise it for an organisation whose users share a
+      single NAT address and sign in together - the block is temporary and lifts
+      once the rate falls, so an over-tight value degrades sign-in rather than
+      locking anyone out permanently.
+  EnableAuthWaf:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: >
+      Attach a regional WAFv2 WebACL to the user pool with two IP rate-limit rules
+      and the AWS known-bad-inputs baseline. Default 'true' (secure-by-default) —
+      NOTE this WebACL is billable; set 'false' to switch it off. Both rate rules
+      block: AuthRateLimit at AuthRateLimitPerIp sign-in attempts per IP per five
+      minutes, and a looser ceiling over all traffic. Tune with AuthRateLimitPerIp
+      rather than by switching an action — the AuthRateLimit CloudWatch metric
+      shows real peaks.
+  EnableCognitoThreatProtection:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: >
+      Put the user pool on the Cognito Plus tier with AdvancedSecurityMode ENFORCED
+      (compromised-credential detection, adaptive authentication). Default 'false': the
+      Plus tier is billed per monthly active user, so it is opt-in. Mandatory MFA and the
+      sign-in rate limit apply regardless.
+
+Conditions:
+  HasFrontendUrl: !Not [!Equals [!Ref FrontendUrl, '']]
+  HasAdminUrl: !Not [!Equals [!Ref AdminUrl, '']]
+  HasInitialAdmin: !Not [!Equals [!Ref InitialAdminEmail, '']]
+  AuthWafEnabled: !Equals [!Ref EnableAuthWaf, 'true']
+  ThreatProtectionEnabled: !Equals [!Ref EnableCognitoThreatProtection, 'true']
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ResourcePrefix}-users'
+      # Advanced security requires the Plus tier (billed per monthly active user), so it
+      # is opt-in via EnableCognitoThreatProtection; the pool is Essentials otherwise.
+      UserPoolTier: !If [ThreatProtectionEnabled, PLUS, ESSENTIALS]
+      UserPoolAddOns: !If
+        - ThreatProtectionEnabled
+        - AdvancedSecurityMode: ENFORCED
+        - !Ref 'AWS::NoValue'
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+      # MFA REQUIRED. Both web apps (operator + admin console) wire the
+      # login-time TOTP challenges against this pool: MFA_SETUP (AssociateSoftwareToken
+      # -> VerifySoftwareToken -> RespondToAuthChallenge) for first-time enrolment and
+      # SOFTWARE_TOKEN_MFA for enrolled users (see frontend/ + admin-console/ useAuth.js).
+      # Only SOFTWARE_TOKEN_MFA (TOTP) is enabled — no SMS, so no SmsConfiguration is
+      # required. Password policy raised to 12 + symbols (NEW passwords only).
+      # NOTE: this pool is created fresh; the bootstrap admin enrols TOTP at first login.
+      MfaConfiguration: 'ON'
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailSubject: !Sub 'Your ${AppName} account is ready'
+          EmailMessage: !Sub |
+            <div style="font-family: -apple-system, Segoe UI, sans-serif; color: #1a1a1a; line-height: 1.6; max-width: 640px; margin: 0 auto;">
+              <h2 style="color: #232f3e; margin-bottom: 4px;">Your ${AppName} account is ready</h2>
+              <p style="color: #666; margin-top: 0;">Here are your temporary credentials.</p>
+              <table style="border-collapse: collapse; margin: 16px 0;">
+                <tr><td style="padding: 8px 16px; background: #f5f5f5; font-weight: bold;">Email</td><td style="padding: 8px 16px;">{username}</td></tr>
+                <tr><td style="padding: 8px 16px; background: #f5f5f5; font-weight: bold;">Temporary password</td><td style="padding: 8px 16px; font-family: ui-monospace, monospace;">{####}</td></tr>
+              </table>
+              <p><strong>Sign in</strong> at the Dashboard or Admin Console URL from your CloudFormation stack outputs. You'll be asked to set a permanent password on first login.</p>
+              <ul style="color: #333; font-size: 14px;">
+                <li><strong>Dashboard</strong> &mdash; operator web app for investigations and reports</li>
+                <li><strong>Admin Console</strong> &mdash; manage users, spaces, and settings (admins only)</li>
+              </ul>
+              <p style="color: #666; font-size: 13px;">If you didn't expect this email, you can ignore it &mdash; the account locks after a few failed logins.</p>
+            </div>
+        UnusedAccountValidityDays: 30
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${ResourcePrefix}-${AWS::AccountId}'
+      UserPoolId: !Ref UserPool
+
+  WebClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: UserPoolDomain
+    Properties:
+      ClientName: !Sub '${ResourcePrefix}-web'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      # Token lifetimes. Access and id tokens are short (60 min) so a changed group
+      # membership is re-read on the next refresh; the refresh token is the bounded,
+      # tunable window (RefreshTokenValidityDays, default 7). EnableTokenRevocation lets
+      # logout and a privilege change actually invalidate a refresh token server-side
+      # via /oauth2/revoke and AdminUserGlobalSignOut, rather than only clearing it from
+      # the browser.
+      EnableTokenRevocation: true
+      # The window to finish a multi-step challenge (NEW_PASSWORD then TOTP enrollment),
+      # not the signed-in session length. The default is 3 minutes, too short to scan a
+      # QR code and enter a code on first sign-in; 15 is the Cognito maximum.
+      AuthSessionValidity: 15
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: !Ref RefreshTokenValidityDays
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      # Return an identical error for an unknown and a known address at sign-in.
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      # Both SPAs share this client, so both CloudFront URLs must be registered or
+      # that app's sign-in fails with redirect_mismatch. localhost stays for `npm run dev`.
+      CallbackURLs:
+        - http://localhost:3000/callback
+        - !If [HasFrontendUrl, !Sub '${FrontendUrl}/callback', !Ref 'AWS::NoValue']
+        - !If [HasAdminUrl, !Sub '${AdminUrl}/callback', !Ref 'AWS::NoValue']
+      LogoutURLs:
+        - http://localhost:3000
+        - !If [HasFrontendUrl, !Ref FrontendUrl, !Ref 'AWS::NoValue']
+        - !If [HasAdminUrl, !Ref AdminUrl, !Ref 'AWS::NoValue']
+
+  M2MClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: ResourceServer
+    Properties:
+      ClientName: !Sub '${ResourcePrefix}-m2m'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - agent-platform-id/service
+      AllowedOAuthFlowsUserPoolClient: true
+
+  ResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      Identifier: agent-platform-id
+      Name: Agent Platform
+      UserPoolId: !Ref UserPool
+      Scopes:
+        - ScopeName: service
+          ScopeDescription: Service-to-service access
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admins
+      Description: Super Admins — global; manage all Agent Spaces and account settings in the admin console
+      UserPoolId: !Ref UserPool
+
+  SpaceAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: space-admins
+      Description: Space Admins — scoped; manage only the Agent Spaces they create or are assigned to
+      UserPoolId: !Ref UserPool
+
+  OperatorGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: operators
+      Description: Operators — can access the Database Insights web app
+      UserPoolId: !Ref UserPool
+
+  # ── Bootstrap first admin on stack Create ──
+  # Idempotent: if the user already exists (e.g. manual Cognito create, or
+  # stack Update where InitialAdminEmail unchanged), the Lambda exits cleanly
+  # without resending the invite.
+
+  BootstrapAdminRole:
+    Type: AWS::IAM::Role
+    Condition: HasInitialAdmin
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoBootstrap
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminAddUserToGroup
+                Resource: !GetAtt UserPool.Arn
+
+  BootstrapAdminFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasInitialAdmin
+    DependsOn: AdminGroup
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt BootstrapAdminRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      # Cap concurrency (CKV_AWS_115 / W92) — one-shot custom resource.
+      ReservedConcurrentExecutions: 2
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import os
+          import urllib.request
+          import boto3
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+          cognito = boto3.client('cognito-idp')
+
+          def _respond(event, context, status, data=None, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'See CloudWatch logs: {context.log_group_name}/{context.log_stream_name}',
+                  'PhysicalResourceId': event.get('PhysicalResourceId') or context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {},
+              }).encode('utf-8')
+              req = urllib.request.Request(event['ResponseURL'], data=body, method='PUT',
+                                           headers={'Content-Type': '', 'Content-Length': str(len(body))})
+              with urllib.request.urlopen(req) as resp:
+                  log.info('CFN response: %s', resp.status)
+
+          def handler(event, context):
+              log.info('Event: %s', json.dumps({k: v for k, v in event.items() if k != 'ResponseURL'}))
+              try:
+                  if event['RequestType'] == 'Delete':
+                      # Leave the admin user alone — they may have changed their
+                      # password and be actively using the system.
+                      _respond(event, context, 'SUCCESS', {'Status': 'noop'})
+                      return
+                  props = event['ResourceProperties']
+                  user_pool_id = props['UserPoolId']
+                  email = props['Email'].strip()
+                  name = props.get('Name', '').strip()
+                  group = props.get('Group', 'admins')
+                  # Idempotent: check for existing user first.
+                  try:
+                      cognito.admin_get_user(UserPoolId=user_pool_id, Username=email)
+                      log.info('User %s already exists — skipping create', email)
+                      created = False
+                  except cognito.exceptions.UserNotFoundException:
+                      attrs = [
+                          {'Name': 'email', 'Value': email},
+                          {'Name': 'email_verified', 'Value': 'true'},
+                      ]
+                      if name:
+                          attrs.append({'Name': 'name', 'Value': name})
+                      cognito.admin_create_user(
+                          UserPoolId=user_pool_id,
+                          Username=email,
+                          UserAttributes=attrs,
+                          DesiredDeliveryMediums=['EMAIL'],
+                      )
+                      log.info('Created user %s', email)
+                      created = True
+                  # Always ensure group membership (idempotent).
+                  try:
+                      cognito.admin_add_user_to_group(UserPoolId=user_pool_id, Username=email, GroupName=group)
+                  except Exception as e:
+                      log.warning('Group add failed: %s', e)
+                  _respond(event, context, 'SUCCESS', {
+                      'Email': email, 'Group': group, 'Created': str(created),
+                  })
+              except Exception as e:
+                  log.exception('Bootstrap admin failed')
+                  _respond(event, context, 'FAILED', reason=str(e)[:1024])
+
+  BootstrapAdmin:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: HasInitialAdmin
+    DependsOn: AdminGroup
+    Properties:
+      ServiceToken: !GetAtt BootstrapAdminFunction.Arn
+      UserPoolId: !Ref UserPool
+      Email: !Ref InitialAdminEmail
+      Name: !Ref InitialAdminName
+      Group: admins
+
+  # ── Auth-endpoint WAF ──
+  # Regional WAFv2 WebACL associated directly with the user pool, so it sees the
+  # managed login pages, the OAuth endpoints and the public auth API operations.
+  #
+  # Two rate rules, because the traffic has two shapes and one limit cannot serve
+  # both. AuthRateLimit counts credential submissions and blocks; AuthVolumeLimit
+  # counts everything at a much higher ceiling and blocks a crude flood. Splitting
+  # them is what lets either one block at all: a single rule over all traffic is
+  # calibrated against page weight, so the number that tolerates an office signing
+  # in at once is far too loose to mean anything against an attacker, and the
+  # number that constrains an attacker locks out the office.
+  #
+  # Neither rule is the account-level defence. Distributed credential stuffing
+  # never trips a per-IP limit; Amazon Cognito's own throttling and lockout are
+  # what answer that. These are volumetric defence-in-depth.
+  AuthWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Condition: AuthWafEnabled
+    Properties:
+      Name: !Sub '${ResourcePrefix}-auth-waf'
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        # Credential submissions only. The scope-down is what makes this
+        # meaningful: without it the rule also counted every page and asset GET
+        # of the login screen, so a sign-in cost ~10 requests instead of ~1 and
+        # the limit tracked page weight rather than people. POST is the whole
+        # test - `/login`, `/oauth2/token` and the auth API operations are POSTs,
+        # while the login page and its assets are GETs.
+        - Name: AuthRateLimit
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref AuthRateLimitPerIp
+              AggregateKeyType: IP
+              ScopeDownStatement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    Method: {}
+                  PositionalConstraint: EXACTLY
+                  SearchString: post
+                  TextTransformations:
+                    - Priority: 0
+                      Type: LOWERCASE
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AuthRateLimit
+        # The volumetric backstop, over all traffic including the GETs the rule
+        # above deliberately ignores. Set high enough that no plausible sign-in
+        # burst reaches it - at roughly ten requests per sign-in this is ~500
+        # people arriving within the same five minutes - so it only ever fires on
+        # a flood.
+        - Name: AuthVolumeLimit
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 5000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AuthVolumeLimit
+        # AWS managed known-bad-inputs baseline (CKV_AWS_192). Enforces
+        # (OverrideAction: None): it triggers on malformed and known-attack
+        # payloads — JNDI lookup strings, bad request lines, header injection —
+        # which a real OAuth client never sends, so there is no legitimate
+        # traffic to calibrate against.
+        #
+        # Enforcing is also what clears CKV_AWS_192: checkov fails any
+        # OverrideAction other than None, so a counted group does not satisfy it.
+        - Name: KnownBadInputs
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: KnownBadInputs
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ResourcePrefix}-auth-waf'
+
+  AuthWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: AuthWafEnabled
+    Properties:
+      ResourceArn: !GetAtt UserPool.Arn
+      WebACLArn: !GetAtt AuthWebAcl.Arn
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+  CognitoDomain:
+    Description: Cognito domain prefix
+    Value: !Sub '${ResourcePrefix}-${AWS::AccountId}'
+  WebClientId:
+    Description: Web client ID (Authorization Code flow)
+    Value: !Ref WebClient
+  M2MClientId:
+    Description: M2M client ID (Client Credentials flow)
+    Value: !Ref M2MClient

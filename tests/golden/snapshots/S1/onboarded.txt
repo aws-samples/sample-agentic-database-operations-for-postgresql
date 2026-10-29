@@ -1,0 +1,71 @@
+Payments
+Payments databases
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+2 databases
+2
+reachable
+metadata refreshed for 2 of 2
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+2 onboarded · 1 found, not onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+4
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Discover & onboard
+Scans each account in its regions for PostgreSQL databases. Onboard the ones this space should include by supplying a read-only user's secret — that is what makes a database part of this space.
+Run discovery again
+4 found · 3 new · 0 proposed to this space
+Scan log
+Found, not yet onboarded (1)
+All Status
+Not onboarded
+Configuring
+Failed
+Deleting
+Delete failed
+1 database
+NAME ACCOUNT ENGINE REGION STATUS ACTIONS
+orders-replica
+replica of orders-db
+111122223333 RDS PostgreSQL us-east-1 New
+Onboard
+Not supported (1)
+Databases discovery found that cannot be onboarded
+NAME REGION REASON
+ledger-global us-east-1 Not supported yet: part of an Aurora Global Database
+Onboarded databases (2)
+All 2
+Ready 2
+Configure monitoring
+All Engines
+Aurora PostgreSQL
+RDS PostgreSQL
+2 databases
+NAME ACCOUNT ENGINE REGION ENDPOINT STATUS MONITORING ACTIONS
+orders-db 111122223333 RDS PostgreSQL us-east-1 orders-db.c0ffee00.us-east-1.rds.amazonaws.com Ready
+TIER 1 · METRICS
+5 min
+TIER 2 · SCAN
+Daily
+billing-cluster
+1 writer, 1 reader
+111122223333 Aurora PostgreSQL us-east-1 billing-cluster.cluster-c0ffee00.us-east-1.rds.amazonaws.com Ready
+TIER 1 · METRICS
+5 min
+TIER 2 · SCAN
+Daily
+Configuration log
+Accounts & regions
+Next: Agent capabilities

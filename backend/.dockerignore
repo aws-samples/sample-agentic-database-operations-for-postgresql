@@ -1,0 +1,10 @@
+__pycache__
+**/__pycache__
+*.pyc
+.env
+.env.example
+docker-compose.yml
+Makefile
+Makefile.bak
+.orchestrator-image
+.batch-image

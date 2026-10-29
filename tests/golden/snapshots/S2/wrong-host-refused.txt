@@ -1,0 +1,13 @@
+Onboard database
+orders-db · RDS PostgreSQL · us-east-1 · account 111122223333
+✓
+Create read-only user & secret
+2
+Connect & test
+Secret ARN *
+Database name
+✕ host_mismatch: This secret's host is orders-replica.c0ffee00.us-east-1.rds.amazonaws.com. Set it to orders-db.c0ffee00.us-east-1.rds.amazonaws.com (for Aurora, the cluster endpoint), or remove host from the secret.
+Cancel
+Previous
+Test secret
+Onboard

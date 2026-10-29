@@ -1,0 +1,2210 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AgentCore Runtime + AWS Batch scan jobs for DB Optimization Agent
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, DynamoDB table names and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  ContainerImageUri:
+    Type: String
+    Description: ECR image URI for the agent container
+
+  BatchImageUri:
+    Type: String
+    Description: ECR image URI for the Batch scan container
+
+  UserPoolId:
+    Type: String
+    Description: Cognito User Pool ID for authentication
+
+  WebClientId:
+    Type: String
+    Description: Web client ID (Authorization Code flow)
+
+  M2MClientId:
+    Type: String
+    Description: M2M client ID (Client Credentials flow)
+
+  JwtSignatureVerification:
+    Type: String
+    Default: 'enforce'
+    AllowedValues: ['off', 'log', 'enforce']
+    Description: >
+      In-app JWT signature verification for the /invocations runtime.
+      'enforce' (default) re-verifies the bearer against the Cognito JWKS and
+      rejects a genuine failure; 'log' verifies and logs only; 'off' disables it.
+      Enforce is safe because the AgentCore CustomJWTAuthorizer already verifies
+      every sanctioned request at the edge, so this only bites a token that
+      reached the container without it. Fails open on JWKS/dependency outage.
+
+  CognitoDomain:
+    Type: String
+    Default: ''
+    Description: >
+      Cognito user pool domain prefix (e.g. <ResourcePrefix>-<acct>). Used
+      by the Learning Agent Lambda to fetch an M2M access token from the Cognito
+      token endpoint so it can call the authenticated /api/learn route.
+
+  ReportsS3Bucket:
+    Type: String
+    Default: ''
+    Description: S3 bucket for health reports
+
+  DbConfigTable:
+    Type: String
+    Default: ''
+    Description: DynamoDB table for database instance registry
+
+  AgentModelId:
+    Type: String
+    Default: global.anthropic.claude-haiku-5-5
+    Description: Bedrock model ID for the agent
+
+  NotificationTopicArn:
+    Type: String
+    Default: ''
+    Description: SNS topic ARN for critical finding notifications
+
+  # The Tier 1 collector's cross-Region host-route repair edits the agent's private
+  # route table (the /32s of databases whose VPC CIDR clashes) and reads which VPC a
+  # peering leads to.
+  PrivateRouteTableId:
+    Type: String
+    Default: ''
+    Description: The agent VPC's private route table (the Tier 1 host-route repair edits only it)
+  AgentVpcId:
+    Type: String
+    Default: ''
+    Description: The agent VPC id
+  # The agent VPC's CIDR, for the runtime's stream redactor only: addresses inside it are
+  # this deployment's own and are masked in what /invocations streams to the browser;
+  # addresses outside it (a monitored database's clients) are the customer's diagnostic
+  # data and are kept. Must match the VpcCidr the VPC stack was created with.
+  AgentVpcCidr:
+    Type: String
+    Default: '172.20.0.0/16'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-4])$'
+    Description: CIDR block of the dedicated agent VPC (masked in streamed agent output)
+
+  # The admin audit vault, for the Tier 1 collector ONLY: it records system admin
+  # events (cluster failover detected, host routes repaired) put-only. The agent
+  # runtime and the Batch scan get none of these.
+  AuditBucketName:
+    Type: String
+    Default: ''
+    Description: >
+      Admin audit vault bucket (storage stack output). Empty leaves the Tier 1 collector
+      with no vault grant; its events are then index-only.
+  AuditVault:
+    Type: String
+    Default: 'on'
+    AllowedValues: ['on', 'off']
+    Description: Initial state of the admin audit vault switch (until a super admin changes it).
+  AuditRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 3653
+    Description: The vault's retention floor in days (the index row's retain_until follows it).
+
+  # VPC Configuration
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets with access to Aurora/RDS (at least 2 AZs)
+
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Security groups allowing outbound to Aurora/RDS on port 5432
+
+  ScanSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: >
+      Dedicated, egress-scoped security group for the Tier 2 scan task. Kept
+      separate from the shared private-workload group so the scan container - which holds
+      the monitored DB password and the cross-account role - does not get all-outbound
+      egress. Its egress is limited to 443/5432/53 in vpc.yaml.
+
+  # The metrics store: two DynamoDB tables (storage.yaml) plus CloudWatch custom metrics.
+  Tier1MetricsTable:
+    Type: String
+    Default: ''
+    Description: DynamoDB table for the Tier 1 rows (the collectors write, the runtime reads)
+
+  Tier2ScansTable:
+    Type: String
+    Default: ''
+    Description: DynamoDB table for the Tier 2 scans (the Batch scan writes, the runtime reads)
+
+  Tier1RetentionDays:
+    Type: Number
+    Default: 30
+    Description: Default TTL (days) for the Tier 1 rows when a database sets none
+
+  # Database alarms (tools/aws/db_alarms.py): the notifier emails this address, the
+  # deployment's notification email, and links to the operator app.
+  AlarmEmailRecipient:
+    Type: String
+    Default: ''
+    Description: Where database alarm emails go (the deployment's notification email)
+  OperatorAppUrl:
+    Type: String
+    Default: ''
+    Description: The operator app URL, linked from alarm emails
+
+
+  LambdaCodeBucket:
+    Type: String
+    Default: ''
+    Description: S3 bucket for Lambda code artifacts (defaults to ReportsS3Bucket)
+
+  ArtifactsVersion:
+    Type: String
+    Default: ''
+    Description: >
+      Content hash of the staged Lambda artifacts, produced by
+      deployment/build-s3-dist.sh. It forms part of the S3 key on purpose:
+      CloudFormation ignores a same-key S3 overwrite, so without a changing key a
+      redeploy would silently NOT roll the Lambda code. Being a content hash rather
+      than a build label means it only changes when the code actually changes, so
+      no-op redeploys do not churn.
+      Leave empty to use the unversioned keys that backend/scripts/build-tier1.sh
+      uploads (the local development path).
+
+  # ─── Agent memory (AgentCore Memory) ───
+  EnableLongTermMemory:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Enable long-term memory extraction (semantic facts, user preferences,
+      session summaries). Extraction runs LLM calls = ongoing cost. Short-term
+      conversation memory is always on regardless of this flag.
+
+  MemoryEventExpiryDays:
+    Type: Number
+    Default: 30
+    MinValue: 3
+    MaxValue: 365
+    Description: Days after which raw short-term conversation events expire (3-365).
+
+  MemoryKmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer-managed KMS key ARN to encrypt agent memory at rest.
+
+  EnableWebSearch:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Enable managed AgentCore Web Search for the docs/research agent. Provisions
+      an AgentCore Gateway + the managed "web-search" connector and sets
+      WEB_SEARCH_GATEWAY_URL on the runtime. ON by default (queries stay inside
+      AWS via the managed connector). Adds a per-query charge (see Indicative
+      costs in the README). Available in us-east-1, eu-west-1 and ap-northeast-1;
+      in any other Region it is skipped. Set to 'false' to run without it (the
+      docs agent then returns an explicit "unverified" instead of live sources).
+      The GatewayTarget connector shape (Mcp.Connector.Source.ConnectorId=web-search
+      + Configurations[{Name: WebSearch, ParameterValues: {}}]) is validated live.
+
+  # ── Bedrock Guardrail ─────────────────────────────────────────────────────────
+  # model_resolver.build_bedrock_model derives the guardrail PURELY from these three
+  # environment variables, and every agent + sub-agent is constructed through it. So the
+  # guardrail's reach is decided by which processes receive them: this stack owns the
+  # AgentCore runtime that serves /invocations — chat and all four sub-agents — and that
+  # runtime is unguarded if they are absent, with nothing at runtime to say so. The
+  # security-posture endpoint reads its own environment, so a process that HAS them will
+  # report the control as on regardless of what any other process received.
+  GuardrailId:
+    Type: String
+    Default: ''
+    Description: >
+      Id of the guardrail attached to the model, screening responses (empty = no
+      guardrail; fail-soft).
+  GuardrailVersion:
+    Type: String
+    Default: ''
+    Description: Version of the model-attached guardrail (empty = no guardrail; fail-soft).
+  InputGuardrailId:
+    Type: String
+    Default: ''
+    Description: >
+      Id of the guardrail applied to a single user turn before it reaches the agent
+      (empty = no input screening; fail-soft).
+  InputGuardrailVersion:
+    Type: String
+    Default: ''
+    Description: Version of the input-screening guardrail (empty = no input screening).
+  GuardrailEnforce:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['on', 'true', 'false', 'off']
+    Description: >
+      Fail-closed guardrail enforcement: refuse the model call rather than run
+      unguarded when the guardrail cannot be resolved. Defaults to 'false' HERE
+      deliberately — this template can be deployed standalone with no guardrail stack,
+      and a default of 'on' would make every model call raise. master.yaml passes 'on'
+      only when EnableGuardrail is true, so the shipped default is fail-closed while a
+      guardrail-less deployment still works.
+  GuardrailThrottleAlarmThreshold:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: >
+      Alarm when ApplyGuardrail throttles (the input screen's calls) exceed this count in
+      a 5-minute window. Throttling means the account is approaching the
+      account-wide ApplyGuardrail service quota; the fix is a Service Quotas increase. A
+      small default catches sustained throttling early. This is the seed value only — an
+      operator can retune the live alarm without a full redeploy, and preflight re-seeds
+      the parameter from the live alarm on the next deploy.
+  GuardrailInterventionAlarmThreshold:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    Description: >
+      Alarm when the input guardrail intervenes (blocks a turn) more than this many times
+      in a 5-minute window — a possible abuse/attack spike. Interventions are
+      normal in ones and twos, so the default is higher than the throttle alarm's. Seed
+      value only, retunable live like the throttle threshold.
+
+Conditions:
+  HasNotificationTopic: !Not [!Equals [!Ref NotificationTopicArn, '']]
+  HasAuditBucket: !Not [!Equals [!Ref AuditBucketName, '']]
+  HasInputGuardrail: !Not [!Equals [!Ref InputGuardrailId, '']]
+  HasMetricsStore: !And
+    - !Not [!Equals [!Ref Tier1MetricsTable, '']]
+    - !Not [!Equals [!Ref Tier2ScansTable, '']]
+  HasLambdaCodeBucket: !Not [!Equals [!Ref LambdaCodeBucket, '']]
+  HasArtifactsVersion: !Not [!Equals [!Ref ArtifactsVersion, '']]
+  EnableLongTermMemoryCond: !Equals [!Ref EnableLongTermMemory, 'true']
+  HasMemoryCmk: !Not [!Equals [!Ref MemoryKmsKeyArn, '']]
+  # The managed AgentCore Web Search connector exists only in these Regions (AgentCore
+  # developer guide, Web Search Tool, Availability). Elsewhere the gateway is skipped, so
+  # the deploy succeeds and the research agent says its sources are unverified.
+  EnableWebSearchCond: !And
+    - !Equals [!Ref EnableWebSearch, 'true']
+    - !Or
+      - !Equals [!Ref 'AWS::Region', 'us-east-1']
+      - !Equals [!Ref 'AWS::Region', 'eu-west-1']
+      - !Equals [!Ref 'AWS::Region', 'ap-northeast-1']
+
+Resources:
+  # ─── IAM Roles ───────────────────────────────────────────────────────────────
+
+  RuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              Required, low-risk wildcards: ecr:GetAuthorizationToken has no
+              resource-level form, and bedrock:InvokeModel targets the managed
+              Claude inference profile. DynamoDB is table-scoped and Secrets
+              Manager is scoped to this account's <prefix>/* and metrics-store
+              namespaces. No IAM-management, unconstrained
+              write, or data-exfiltration grants.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "Wildcards are read/get only (ECR auth, Bedrock); no unconstrained write."
+          - id: CKV_AWS_107
+            comment: "Secrets Manager is scoped to this account's <prefix>/* and metrics-store secrets."
+          - id: CKV_AWS_108
+            comment: "No data-exfiltration path; reads are scoped to app data and this deployment's secrets."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  # Required in addition to the invoke actions whenever a guardrail is
+                  # attached: without it a guarded call fails with AccessDenied rather
+                  # than running. Shares the '*' resource of the invoke actions above —
+                  # the guardrail is created in a sibling stack and its id arrives as a
+                  # parameter that is empty on a partial deploy, so it cannot be named
+                  # in the policy. Mirrors api.yaml.
+                  - bedrock:ApplyGuardrail
+                  # Discovery for model governance (read-only; no resource-level form)
+                  - bedrock:ListInferenceProfiles
+                  - bedrock:ListFoundationModels
+                  - bedrock:GetInferenceProfile
+                Resource: '*'
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Same-account secrets only, and only the two namespaces this deployment
+              # uses: <ResourcePrefix>/* customer database secrets and the metrics-store
+              # credentials. Cross-account customer secrets are read through the
+              # assumed per-space access role, not this one. This was Resource: '*',
+              # which let anything holding this role read every secret in the account —
+              # including secrets belonging to unrelated applications. The narrower form
+              # is the same one the batch job role and the api.yaml task role already
+              # use, so this is consistency rather than a new constraint: a database
+              # registered with a secret outside that prefix is already unreadable
+              # through those paths.
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:${ResourcePrefix}/*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}/index/*'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-spaces'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-user-knowledge'
+                  # Read the per-investigation pinned model at stream start (the
+                  # investigations branch of /invocations). Missing here caused
+                  # AccessDenied on GetItem → every investigation 500'd before
+                  # streaming and got stuck "running".
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-investigations'
+                  # Per-caller rate-limit counters: the /invocations path
+                  # increments a per-caller window with UpdateItem before running the
+                  # model; the limiter fails open if this is unavailable.
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-rate-limits'
+                  # The chat session row holds the stable per-session database alias map
+                  # (db-1, db-2, ...): the /invocations chat path reads it with GetItem
+                  # and writes it with PutItem/UpdateItem each turn. Missing here made
+                  # the runtime 424 on the first live turn (GetItem AccessDenied bubbled
+                  # up as an unhandled ASGI error); report-mode chat never reads it.
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-sessions'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-sessions/index/*'
+              # The audit index is insert-only for the runtime: its query_plan events
+              # (db_tools._audit_query_plan) are index rows in partition `agent`,
+              # never vaulted and never read back here, so PutItem is all it needs.
+              # No grant on the audit vault bucket by design (the Tier 1 collector's
+              # put-only grant below is the only one in this template).
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-audit'
+              # Only the API task may change the admin audit vault switch. The runtime
+              # still reads it through GetItem above.
+              - Sid: DenyAuditSettingsWrite
+                Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                Condition:
+                  'ForAnyValue:StringEquals':
+                    'dynamodb:LeadingKeys': [audit_settings]
+        - PolicyName: AuditMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # IndexWriteFailures datapoints for the audit-index-write-failed alarm
+              # (api.yaml). Only this deployment's own namespace.
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': !Sub '${ResourcePrefix}/Audit'
+        - PolicyName: SpaceAdminTierLookup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Request-time model and knowledge resolution reads the space-admins group
+              # to find the admin tier above a space (tools/aws/space_admins.py). Read of
+              # one group's membership in this deployment's pool, nothing else.
+              - Effect: Allow
+                Action: cognito-idp:ListUsersInGroup
+                Resource: !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ReportsS3Bucket}'
+                  - !Sub 'arn:aws:s3:::${ReportsS3Bucket}/*'
+        - PolicyName: VPCAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeVpcs
+                Resource: '*'
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+        # The metrics store, READ side: the agent's tools read the Tier 1 rows, the Tier 2
+        # scans and the CloudWatch series; they never write (the collectors do), so the
+        # runtime cannot forge or erase collection history.
+        - PolicyName: MetricsStoreRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:Query
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier1MetricsTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier2ScansTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier2ScansTable}/index/*'
+              - Effect: Allow
+                Action: cloudwatch:GetMetricData
+                Resource: '*'          # no resource-level form for this action
+        - PolicyName: BatchAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - batch:SubmitJob
+                Resource:
+                  - !Ref BatchJobQueue
+                  - !Ref BatchJobDefinition
+              # batch:DescribeJobs has no resource-level form, so it stays '*'; kept in
+              # its own statement so SubmitJob is scoped to this deployment's queue and
+              # job definition only (matches the ECS task role in api.yaml).
+              - Effect: Allow
+                Action:
+                  - batch:DescribeJobs
+                Resource: '*'
+        - PolicyName: DiscoveryAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBSubnetGroups
+                  - rds:DescribeGlobalClusters
+                  - sts:GetCallerIdentity
+                Resource: '*'
+              # Kept in its own statement so the scoping is visible rather than buried in
+              # the wildcard list above. docs/ARCHITECTURE.md states the cross-account
+              # assumption is "scoped by role name <ResourcePrefix>-*", and the accepted
+              # risk for carrying no sts:ExternalId depends on that being true of EVERY
+              # caller — this role, the ECS task role (api.yaml), the Batch task role and
+              # the Tier 1 collector role. One of them widening quietly undoes it.
+              #
+              # The pattern is safe by the deployment's own naming contract: the
+              # customer-installed role defaults to <prefix>-discovery, per-space roles
+              # are <prefix>-agent-<slug>-<id6>, and the member-account role the console
+              # hands out scopes its secret access to this deployment's ResourcePrefix.
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:aws:iam::*:role/${ResourcePrefix}-*'
+        - PolicyName: ObservabilityAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Account-wide read/discovery. These APIs do not support
+              # resource-level scoping (CloudWatch/PI metrics, CloudTrail
+              # LookupEvents, Logs Insights, Resource Explorer), so '*' is required.
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DescribeAlarmsForMetric
+                  - pi:GetResourceMetrics
+                  - pi:DescribeDimensionKeys
+                  - pi:GetDimensionKeyDetails
+                  - cloudtrail:LookupEvents
+                  - logs:FilterLogEvents
+                  - logs:GetLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - resource-explorer-2:Search
+                  - resource-explorer-2:ListIndexes
+                  - resource-explorer-2:GetIndex
+                  - resource-explorer-2:CreateIndex
+                  - resource-explorer-2:UpdateIndexType
+                Resource: '*'
+        - PolicyName: NetworkAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateVpcPeeringConnection
+                  - ec2:AcceptVpcPeeringConnection
+                  - ec2:DescribeVpcPeeringConnections
+                  - ec2:DeleteVpcPeeringConnection
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:CreateTags
+                Resource: '*'
+        - PolicyName: AgentCoreMemoryAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Memory data-plane, scoped to this deployment's memory resource.
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateEvent
+                  - bedrock-agentcore:ListEvents
+                  - bedrock-agentcore:GetEvent
+                  - bedrock-agentcore:ListSessions
+                  - bedrock-agentcore:ListActors
+                  - bedrock-agentcore:RetrieveMemoryRecords
+                  - bedrock-agentcore:ListMemoryRecords
+                  - bedrock-agentcore:GetMemoryRecord
+                  - bedrock-agentcore:GetMemory
+                Resource:
+                  - !GetAtt AgentMemory.MemoryArn
+                  - !Sub '${AgentMemory.MemoryArn}/*'
+        - PolicyName: WebSearchGatewayInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Call the AgentCore Web Search Gateway with SigV4 (AWS_IAM inbound).
+              # Scoped to this account's gateways; the gateway is only created when
+              # EnableWebSearch=true, so this grant is inert until then.
+              - Effect: Allow
+                Action: bedrock-agentcore:InvokeGateway
+                Resource: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:gateway/*'
+        # Replaces CloudWatchLogsFullAccess, which granted logs:* account-wide —
+        # including deleting the record of the agent's own actions
+        # (AwsSolutions-IAM4). The runtime only writes its own trace and session
+        # logs, so this carries no Delete and no read action.
+        - PolicyName: CloudWatchLogsScoped
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*:log-stream:*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ResourcePrefix}/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${ResourcePrefix}/*:log-stream:*'
+
+  # ─── AgentCore Memory (conversation short-term + long-term) ─────────────────
+
+  # Role the AgentCore Memory service assumes to run long-term extraction
+  # strategies (invokes Bedrock). Only created when long-term memory is enabled.
+  MemoryExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: EnableLongTermMemoryCond
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              bedrock:InvokeModel has no usable resource-level form for the
+              cross-region inference profiles used for extraction. This role is
+              assumed only by the AgentCore Memory service.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "bedrock:InvokeModel for memory extraction; inference-profile ids are not resource-scopable."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MemoryExtractionBedrock
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+
+  AgentMemory:
+    Type: AWS::BedrockAgentCore::Memory
+    Properties:
+      # Derived from ResourcePrefix, like AgentRuntimeName below. AgentCore memory
+      # names are unique per account and disallow hyphens, hence the underscore join.
+      # Deriving the name from the prefix rather than a hardcoded literal keeps two
+      # installations in one account from colliding on AlreadyExists;
+      # deployment/check-resource-names.py guards against a hardcoded name slipping back in.
+      Name: !Join ['_', !Split ['-', !Sub '${ResourcePrefix}-memory']]
+      Description: Conversation short-term + long-term memory for the DBOps Agent
+      EventExpiryDuration: !Ref MemoryEventExpiryDays
+      EncryptionKeyArn: !If [HasMemoryCmk, !Ref MemoryKmsKeyArn, !Ref 'AWS::NoValue']
+      MemoryExecutionRoleArn: !If [EnableLongTermMemoryCond, !GetAtt MemoryExecutionRole.Arn, !Ref 'AWS::NoValue']
+      MemoryStrategies: !If
+        - EnableLongTermMemoryCond
+        - - SemanticMemoryStrategy:
+              Name: FactExtractor
+              Namespaces:
+                - "/facts/{actorId}/"
+          - UserPreferenceMemoryStrategy:
+              Name: PreferenceLearner
+              Namespaces:
+                - "/preferences/{actorId}/"
+          - SummaryMemoryStrategy:
+              Name: SessionSummarizer
+              Namespaces:
+                - "/summaries/{actorId}/{sessionId}/"
+        - !Ref 'AWS::NoValue'
+
+  # ─── AgentCore Runtime (VPC / PRIVATE mode) ─────────────────────────────────
+
+  AgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      # Runtime names are unique per account, so this must carry the prefix or a second
+      # installation collides. AgentCore only accepts letters, digits and underscores -
+      # no hyphens - so fold the prefix's hyphens into underscores: a ResourcePrefix of
+      # 'my-team' yields 'my_team_agent'.
+      AgentRuntimeName: !Join ['_', !Split ['-', !Sub '${ResourcePrefix}-agent']]
+      AgentRuntimeArtifact:
+        ContainerConfiguration:
+          ContainerUri: !Ref ContainerImageUri
+      ProtocolConfiguration: HTTP
+      RoleArn: !GetAtt RuntimeExecutionRole.Arn
+      NetworkConfiguration:
+        NetworkMode: VPC
+        NetworkModeConfig:
+          Subnets: !Ref SubnetIds
+          SecurityGroups: !Ref SecurityGroupIds
+      AuthorizerConfiguration:
+        CustomJWTAuthorizer:
+          DiscoveryUrl: !Sub 'https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}/.well-known/openid-configuration'
+          AllowedClients:
+            - !Ref WebClientId
+            - !Ref M2MClientId
+      # Forward the (JWT-validated) Authorization header through to the container.
+      # Without this allowlist AgentCore consumes the bearer token at its inbound
+      # auth boundary and the container sees no Authorization header — so the agent
+      # can't derive the caller's Cognito sub (actor_id), the AgentCore Memory
+      # session manager never attaches, and conversation turns are never persisted
+      # (chat history is lost on browser refresh). Allowlisting Authorization lets
+      # /invocations read the caller identity and write memory under the real actor.
+      RequestHeaderConfiguration:
+        RequestHeaderAllowlist:
+          - Authorization
+      EnvironmentVariables:
+        AWS_REGION: !Ref AWS::Region
+        REPORTS_S3_BUCKET: !Ref ReportsS3Bucket
+        DB_CONFIG_TABLE: !Ref DbConfigTable
+        RESOURCE_PREFIX: !Ref ResourcePrefix
+        AGENT_MODEL_ID: !Ref AgentModelId
+        NOTIFICATION_TOPIC_ARN: !Ref NotificationTopicArn
+        TIER1_METRICS_TABLE: !Ref Tier1MetricsTable
+        TIER2_SCANS_TABLE: !Ref Tier2ScansTable
+        CW_METRICS_NAMESPACE: !Sub '${ResourcePrefix}/Metrics'
+        # The stream redactor (streaming/event_parser.py) masks addresses inside this
+        # range: the deployment's own identifiers.
+        AGENT_VPC_CIDR: !Ref AgentVpcCidr
+        MEMORY_ID: !GetAtt AgentMemory.MemoryId
+        # Managed web search (empty unless EnableWebSearch=true). docs_agent
+        # treats an empty value as "disabled" and uses built-in search.
+        WEB_SEARCH_GATEWAY_URL: !If [EnableWebSearchCond, !GetAtt WebSearchGateway.GatewayUrl, '']
+        # This runtime serves /invocations — chat and all four sub-agents. Every one of
+        # those model calls is built by model_resolver.build_bedrock_model, which reads
+        # the model-attached guardrail from GUARDRAIL_ID/GUARDRAIL_VERSION, so the whole
+        # agent path is unguarded without them. GUARDRAIL_INPUT_* is the other half:
+        # model_resolver.screen_user_input applies it to one user turn before the agent
+        # runs, which is also where a refused turn is dropped rather than persisted to
+        # conversation memory. See the parameter comments above.
+        GUARDRAIL_ID: !Ref GuardrailId
+        GUARDRAIL_VERSION: !Ref GuardrailVersion
+        GUARDRAIL_INPUT_ID: !Ref InputGuardrailId
+        GUARDRAIL_INPUT_VERSION: !Ref InputGuardrailVersion
+        GUARDRAIL_ENFORCE: !Ref GuardrailEnforce
+        # in-app JWT enforcement for /invocations. USER_POOL_ID/WEB_CLIENT_ID/
+        # M2M_CLIENT_ID let the verifier re-check signature+issuer+expiry against the
+        # Cognito JWKS and bind the token to a known app client; JWT_SIGNATURE_VERIFICATION
+        # selects off/log/enforce (default enforce). The AgentCore authorizer already
+        # verifies every sanctioned request, so enforce only rejects a token that reached
+        # the container without the edge.
+        USER_POOL_ID: !Ref UserPoolId
+        WEB_CLIENT_ID: !Ref WebClientId
+        M2M_CLIENT_ID: !Ref M2MClientId
+        JWT_SIGNATURE_VERIFICATION: !Ref JwtSignatureVerification
+
+  # ─── AgentCore Web Search (managed docs/web retrieval via Gateway MCP) ───────
+  # Optional (EnableWebSearch=true). Provisions a Gateway fronting the managed
+  # "web-search" connector; the runtime reaches it over MCP with SigV4 (AWS_IAM
+  # inbound). us-east-1, eu-west-1 and ap-northeast-1 only (skipped elsewhere);
+  # adds a per-query charge. Connector + credential
+  # shapes follow the CloudFormation reference and are validated on first deploy
+  # with the flag enabled.
+
+  WebSearchGatewayRole:
+    Type: AWS::IAM::Role
+    Condition: EnableWebSearchCond
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeWebSearchTool
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Outbound: let the gateway invoke the AWS-owned managed web-search tool.
+              - Effect: Allow
+                Action: bedrock-agentcore:InvokeWebSearch
+                Resource: !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:aws:tool/web-search.v1'
+
+  WebSearchGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Condition: EnableWebSearchCond
+    Properties:
+      Name: !Sub '${ResourcePrefix}-web-search'
+      Description: Managed AgentCore Web Search connector for the docs agent
+      ProtocolType: MCP
+      AuthorizerType: AWS_IAM
+      RoleArn: !GetAtt WebSearchGatewayRole.Arn
+
+  WebSearchGatewayTarget:
+    Type: AWS::BedrockAgentCore::GatewayTarget
+    Condition: EnableWebSearchCond
+    Properties:
+      Name: web-search-tool
+      GatewayIdentifier: !GetAtt WebSearchGateway.GatewayIdentifier
+      CredentialProviderConfigurations:
+        - CredentialProviderType: GATEWAY_IAM_ROLE
+      TargetConfiguration:
+        Mcp:
+          Connector:
+            # Managed AgentCore Web Search Tool connector (GA). connectorId "web-search";
+            # see EnableWebSearchCond for its Regions. Shape matches the GA reference: exactly one Configurations
+            # entry named "WebSearch" with an (empty) ParameterValues object. The service
+            # rejects a missing per-tool config ("Connector configurations must not be
+            # null"); the earlier lowercase "webSearch" + Enabled[] shape was unconfirmed —
+            # the GA reference omits Enabled and uses the capitalized tool name.
+            Source:
+              ConnectorId: web-search
+            Configurations:
+              - Name: WebSearch
+                ParameterValues: {}
+
+  # ─── Lambda: Scan Trigger (EventBridge → M2M Auth → Agent) ──────────────────
+
+  ScanTriggerRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              batch:DescribeJobs and scheduler:* have no usable resource-level
+              scoping; DynamoDB is table-scoped. The role only reads config and
+              submits/queries scan jobs — no credential-exposure, exfiltration,
+              or IAM-management actions.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "batch:DescribeJobs / scheduler:* have no resource-level form; DynamoDB is table-scoped."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-spaces'
+        - PolicyName: SubmitBatchJobs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - batch:SubmitJob
+                Resource:
+                  - !Ref BatchJobQueue
+                  - !Ref BatchJobDefinition
+              # batch:DescribeJobs has no resource-level form, so it stays '*'; kept in
+              # its own statement so SubmitJob is scoped to this deployment's queue and
+              # job definition only (matches the ECS task role in api.yaml).
+              - Effect: Allow
+                Action:
+                  - batch:DescribeJobs
+                Resource: '*'
+        - PolicyName: SchedulerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - scheduler:CreateSchedule
+                  - scheduler:UpdateSchedule
+                  - scheduler:DeleteSchedule
+                  - scheduler:GetSchedule
+                Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  ScanTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}-scan-trigger'
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 256
+      # Cap concurrency (CKV_AWS_115 / W92) — low-volume scheduler trigger;
+      # protects the customer account's concurrency pool from runaway invokes.
+      ReservedConcurrentExecutions: 5
+      Role: !GetAtt ScanTriggerRole.Arn
+      Environment:
+        Variables:
+          DB_CONFIG_TABLE: !Ref DbConfigTable
+          RESOURCE_PREFIX: !Ref ResourcePrefix
+          AWS_REGION_NAME: !Ref AWS::Region
+          SPACES_TABLE: !Sub '${ResourcePrefix}-spaces'
+          BATCH_JOB_QUEUE: !Ref BatchJobQueue
+          BATCH_JOB_DEFINITION: !Ref BatchJobDefinition
+          REPORTS_S3_BUCKET: !Ref ReportsS3Bucket
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopicArn
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+
+          def handler(event, context):
+              """Submit a Batch scan job for a specific database instance."""
+              dynamodb = boto3.resource('dynamodb')
+              table = dynamodb.Table(os.environ['DB_CONFIG_TABLE'])
+              batch = boto3.client('batch')
+
+              instance_id = event.get('instance_id')
+              if not instance_id:
+                  print("No instance_id in event — per-database schedules must provide instance_id")
+                  return {'submitted': 0}
+
+              item = table.get_item(Key={'instance_id': instance_id}).get('Item')
+              if not item:
+                  print(f"Instance {instance_id} not found")
+                  return {'submitted': 0}
+
+              secret = item.get('secret_arn', '')
+              if not secret:
+                  print(f"Skipping {instance_id}: no secret_arn configured")
+                  return {'submitted': 0}
+
+              # Resolve cross-account role ARN from the reach provider's space
+              # (DB-level tenancy: reach_space_id, falling back to legacy tags.space_id).
+              cross_account_role = ''
+              account_id = item.get('account_id', '')
+              space_id = item.get('reach_space_id') or item.get('tags', {}).get('space_id', '')
+              if account_id and space_id:
+                  spaces_table = dynamodb.Table(os.environ['SPACES_TABLE'])
+                  space = spaces_table.get_item(Key={'space_id': space_id}).get('Item', {})
+                  primary_id = space.get('primary_account_id', '')
+                  if account_id != primary_id:
+                      role_names = space.get('secondary_role_names') or {}
+                      role_name = role_names.get(account_id, '')
+                      if role_name:
+                          cross_account_role = f'arn:aws:iam::{account_id}:role/{role_name}'
+
+              try:
+                  batch.submit_job(
+                      # The full registry id: the API's duplicate guard and job
+                      # history look jobs up by exactly this name (app._scan_job_name).
+                      jobName=f"scan-{instance_id}",
+                      jobQueue=os.environ['BATCH_JOB_QUEUE'],
+                      jobDefinition=os.environ['BATCH_JOB_DEFINITION'],
+                      containerOverrides={
+                          'environment': [
+                              {'name': 'SECRET_ARN', 'value': secret},
+                              {'name': 'DATABASE_NAME', 'value': item.get('database_name', 'postgres')},
+                              {'name': 'INSTANCE_ID', 'value': instance_id},
+                              {'name': 'ACCOUNT_ID', 'value': item.get('account_id', 'unknown')},
+                              {'name': 'DISPLAY_NAME', 'value': item.get('display_name', instance_id)},
+                              {'name': 'ENGINE', 'value': item.get('engine', 'aurora-postgresql')},
+                              {'name': 'NETWORK_METHOD', 'value': item.get('network_method', '')},
+                              {'name': 'CROSS_ACCOUNT_ROLE_ARN', 'value': cross_account_role},
+                          ],
+                      },
+                  )
+                  print(f"Submitted scan job for {item.get('display_name', instance_id)}")
+                  return {'submitted': 1}
+              except Exception as e:
+                  # RAISE, do not swallow. A scheduled invoke that returns a 200 with an
+                  # error inside tells EventBridge Scheduler the run succeeded, so nothing
+                  # retries and the DLQ never sees it — that database's deep scan simply
+                  # vanishes for the period. Raising makes the invocation fail, so the
+                  # schedule's RetryPolicy retries and, past that, the target DLQ captures
+                  # the payload and the DLQ alarm fires.
+                  print(f"Failed to submit job for {instance_id}: {e}")
+                  raise
+
+  # ─── EventBridge Scheduler ──────────────────────────────────────────────────
+
+  # Dead-letter queue for the scheduled Tier 2 scan trigger (CKV_AWS_116 / W92).
+  # The per-database Tier 2 schedules (created from the API with EventBridge Scheduler)
+  # target this Lambda; the schedule carries a RetryPolicy and this DLQ, so an invoke
+  # that keeps failing lands here instead of vanishing with a log line and no scan.
+  ScanTriggerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}-scan-trigger-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      SqsManagedSseEnabled: true
+
+  # Depth alarm on the queue above. See LearningAgentDLQAlarm for why TreatMissingData
+  # and the conditional AlarmActions are shaped this way.
+  ScanTriggerDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-scan-trigger-dlq-not-empty'
+      AlarmDescription: >-
+        Messages in the Tier 2 scan-trigger dead-letter queue. EventBridge Scheduler
+        invokes the scan trigger for a database's scheduled deep scan; anything here is a
+        scheduled scan that failed to submit after its retries, so the next report for
+        that database never appears. The message body carries the schedule's input
+        (the instance_id), and the attributes carry the cause.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ScanTriggerDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ScanTriggerFunction.Arn
+        # The schedule's own role delivers a failed invoke to the target DLQ, so it needs
+        # SendMessage on that queue (EventBridge Scheduler uses the schedule's RoleArn for
+        # dead-letter delivery).
+        - PolicyName: DlqSend
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ScanTriggerDLQ.Arn
+
+  # Per-database schedules are created dynamically via the API using EventBridge Scheduler SDK
+  # No global fallback schedule — all scheduling is managed per-database from the admin console
+
+  # ─── Learning Agent Lambda (thin trigger — calls ECS API to run the agent) ───
+
+  LearningAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: DLQAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt LearningAgentDLQ.Arn
+        # M2M auth: read the M2M app-client secret to mint a client-credentials
+        # token, and discover the HTTP API URL by name (the API stack is created
+        # after this stack, so the URL isn't known at deploy time).
+        - PolicyName: M2MAuthAndApiDiscovery
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cognito-idp:DescribeUserPoolClient
+                Resource: !Sub 'arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}'
+              - Effect: Allow
+                Action: apigateway:GET
+                Resource: !Sub 'arn:aws:apigateway:${AWS::Region}::/apis'
+
+  # Dead-letter queue for the SNS-invoked Learning Agent (CKV_AWS_116 / W92).
+  # Async (SNS) invocations that fail after retries land here instead of being
+  # silently dropped — important in production for not losing learning events.
+  LearningAgentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}-learning-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      SqsManagedSseEnabled: true
+
+  # A dead-letter queue nobody watches only converts silent loss into silent
+  # accumulation, so the queue above is paired with an alarm on its depth.
+  #
+  # TreatMissingData: notBreaching covers the idle case. An active queue publishes
+  # ApproximateNumberOfMessagesVisible every five minutes including a 0, so the
+  # alarm normally settles in OK on real data (verified against both a queue
+  # holding 18 messages and an empty one). SQS stops publishing for a queue with no
+  # activity for several hours, and the default then drops the alarm into
+  # INSUFFICIENT_DATA rather than leaving it OK - noise that teaches people to
+  # ignore it. A DLQ is idle whenever things are healthy, which is most of the time.
+  #
+  # AlarmActions is conditional because NotificationTopicArn defaults to empty.
+  # The alarm is still created without it: the state is visible in the console and
+  # to anything reading alarm history, it just cannot notify.
+  LearningAgentDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-learning-dlq-not-empty'
+      AlarmDescription: >-
+        Messages in the Learning Agent dead-letter queue. SNS invokes the learning
+        trigger asynchronously, so anything here is a learning event that was
+        accepted and then dropped after its retries. Inspect the message body for
+        the original payload and the ErrorMessage attribute for the cause.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt LearningAgentDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  # ─── Bedrock guardrail alarms ──────────────────────────────────────────
+  # The input screen calls the ApplyGuardrail API once per turn, and ApplyGuardrail
+  # throttles on an ACCOUNT-WIDE quota (requests/sec and text-units/sec per policy). At
+  # enterprise scale these alarms are the operator's early warning to request a Service
+  # Quotas increase before screening starts to degrade. Only meaningful when an input
+  # guardrail is configured; they notify the deployment SNS topic when one is set (same
+  # pattern as the DLQ alarms). Namespace and metric names per the Bedrock Guardrails
+  # CloudWatch metrics documentation (AWS/Bedrock/Guardrails).
+  GuardrailThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasInputGuardrail
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-guardrail-applyguardrail-throttled'
+      AlarmDescription: >-
+        ApplyGuardrail calls (the input screen) are being throttled, which means this
+        deployment is approaching the account-wide ApplyGuardrail service quota. Request a
+        quota increase (requests/sec and text-units/sec per policy) before screening
+        degrades. Under GUARDRAIL_ENFORCE a sustained throttle refuses turns; by default it
+        fails open, so screening is silently reduced under load.
+      Namespace: AWS/Bedrock/Guardrails
+      MetricName: InvocationThrottles
+      Dimensions:
+        - Name: Operation
+          Value: ApplyGuardrail
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref GuardrailThrottleAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  GuardrailInterventionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasInputGuardrail
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-guardrail-interventions-high'
+      AlarmDescription: >-
+        The input guardrail is intervening (blocking turns) unusually often, which can
+        indicate a prompt-attack or abuse spike. Interventions in ones and twos are normal,
+        so this fires only above the configured threshold. Investigate the source; nothing
+        is done automatically.
+      Namespace: AWS/Bedrock/Guardrails
+      MetricName: InvocationsIntervened
+      Dimensions:
+        - Name: Operation
+          Value: ApplyGuardrail
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: !Ref GuardrailInterventionAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  LearningAgentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}-learning-trigger'
+      Runtime: python3.13
+      Handler: index.handler
+      Timeout: 60
+      MemorySize: 128
+      # Cap concurrency (CKV_AWS_115 / W92).
+      ReservedConcurrentExecutions: 10
+      # Dead-letter queue for failed async invocations (CKV_AWS_116).
+      DeadLetterConfig:
+        TargetArn: !GetAtt LearningAgentDLQ.Arn
+      Role: !GetAtt LearningAgentRole.Arn
+      Environment:
+        Variables:
+          # Optional explicit override; if blank, the function resolves the
+          # HTTP API URL by name at runtime (the API stack is created later).
+          API_URL: ''
+          API_NAME: !Sub '${ResourcePrefix}-api'
+          RESOURCE_PREFIX: !Ref ResourcePrefix
+          USER_POOL_ID: !Ref UserPoolId
+          M2M_CLIENT_ID: !Ref M2MClientId
+          COGNITO_DOMAIN: !Ref CognitoDomain
+          M2M_SCOPE: agent-platform-id/service
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import base64
+          import logging
+          from urllib import request, parse, error
+
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          _cognito = boto3.client("cognito-idp")
+          _apigw = boto3.client("apigatewayv2")
+
+          # Caches that persist across warm invocations.
+          _api_url = None
+          _client_secret = None
+
+
+          def _get_client_secret():
+              global _client_secret
+              if _client_secret is None:
+                  resp = _cognito.describe_user_pool_client(
+                      UserPoolId=os.environ["USER_POOL_ID"],
+                      ClientId=os.environ["M2M_CLIENT_ID"],
+                  )
+                  _client_secret = resp["UserPoolClient"]["ClientSecret"]
+              return _client_secret
+
+
+          def _get_api_url():
+              global _api_url
+              if _api_url:
+                  return _api_url
+              override = os.environ.get("API_URL", "").strip()
+              if override:
+                  _api_url = override.rstrip("/")
+                  return _api_url
+              region = os.environ["AWS_REGION"]
+              api_name = os.environ["API_NAME"]
+              for api in _apigw.get_apis().get("Items", []):
+                  if api.get("Name") == api_name:
+                      _api_url = f"https://{api['ApiId']}.execute-api.{region}.amazonaws.com"
+                      return _api_url
+              raise RuntimeError(f"HTTP API named {api_name!r} not found")
+
+
+          def _get_token():
+              region = os.environ["AWS_REGION"]
+              domain = os.environ["COGNITO_DOMAIN"]
+              client_id = os.environ["M2M_CLIENT_ID"]
+              secret = _get_client_secret()
+              token_url = f"https://{domain}.auth.{region}.amazoncognito.com/oauth2/token"
+              creds = base64.b64encode(f"{client_id}:{secret}".encode()).decode()
+              body = parse.urlencode({
+                  "grant_type": "client_credentials",
+                  "scope": os.environ.get("M2M_SCOPE", "agent-platform-id/service"),
+              }).encode()
+              req = request.Request(token_url, data=body, method="POST", headers={
+                  "Authorization": f"Basic {creds}",
+                  "Content-Type": "application/x-www-form-urlencoded",
+              })
+              with request.urlopen(req, timeout=10) as resp:
+                  return json.loads(resp.read().decode())["access_token"]
+
+
+          def handler(event, context):
+              """Parse SNS scan-completed events and call the authenticated
+              /api/learn route (M2M bearer token) to run the Learning Agent."""
+              records = event.get("Records", [])
+              # Resolve the API URL + mint a token once per invocation. Failures
+              # raise so the event goes to the DLQ for retry rather than being
+              # silently dropped.
+              api_url = _get_api_url()
+              token = _get_token()
+
+              processed = 0
+              for record in records:
+                  try:
+                      body = json.loads(record.get("Sns", {}).get("Message", "{}"))
+                  except (json.JSONDecodeError, KeyError):
+                      continue
+                  instance_id = body.get("instance_id")
+                  if not instance_id:
+                      continue
+                  url = f"{api_url}/api/learn/{parse.quote(str(instance_id))}"
+                  logger.info(f"Triggering learning agent: {url}")
+                  try:
+                      req = request.Request(url, method="POST",
+                          headers={"Content-Type": "application/json",
+                                   "Authorization": f"Bearer {token}"},
+                          data=b"{}")
+                      with request.urlopen(req, timeout=35) as resp:
+                          result = json.loads(resp.read().decode())
+                          logger.info(f"Learning agent result: {result}")
+                      processed += 1
+                  except error.HTTPError as e:
+                      logger.error(f"Learning call failed {e.code}: {e.read().decode()[:200]}")
+                  except Exception as e:
+                      logger.error(f"Failed to call learning agent: {e}")
+
+              return {"processed": processed}
+
+  # SNS subscription for Learning Agent
+  LearningAgentSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationTopic
+    Properties:
+      TopicArn: !Ref NotificationTopicArn
+      Protocol: lambda
+      Endpoint: !GetAtt LearningAgentFunction.Arn
+
+  LearningAgentSNSPermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasNotificationTopic
+    Properties:
+      FunctionName: !Ref LearningAgentFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref NotificationTopicArn
+
+  # ─── Tier 1 Metrics Collector Lambda ──────────────────────────────────────────
+
+  Tier1CollectorRole:
+    Type: AWS::IAM::Role
+    Condition: HasMetricsStore
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              sts:AssumeRole targets this deployment's own cross-account role
+              namespaces in member accounts that are not known at deploy time;
+              rds-data is scoped to the metrics cluster ARN, DynamoDB to specific
+              tables, and Secrets Manager to this account's own namespaces. Read-only
+              collector.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "Cross-account roles are not known at deploy time; DynamoDB, CloudWatch and Secrets Manager are all scoped."
+          - id: CKV_AWS_107
+            comment: "Secrets Manager is scoped to this account's <prefix>/* secrets."
+          - id: CKV_AWS_108
+            comment: "No exfiltration path; collector only writes metrics into its own table and namespace."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+      Policies:
+        - PolicyName: DynamoDBRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-spaces'
+        - PolicyName: SecretsManagerRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Same-account secrets only — see the equivalent comment on the task role
+              # above. The collector reaches a cross-account database by assuming the
+              # per-space access role first, so this role never needs to read a secret
+              # outside this account.
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:${ResourcePrefix}/*'
+        # The metrics store, WRITE side. The collector puts its own rows and publishes the
+        # numeric series. Its only read is a Query of the Tier 1 table (its previous
+        # sample of each member, for the per-interval counters); it holds nothing on the
+        # Tier 2 table and no GetMetricData, so a compromised collector cannot read scan
+        # history fleet-wide. PutMetricData has no resource-level form; the namespace
+        # condition pins it to this deployment's own.
+        - PolicyName: MetricsStoreWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:Query
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier1MetricsTable}'
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Sub '${ResourcePrefix}/Metrics'
+        - PolicyName: CrossAccountAssume
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to the same pattern as the ECS task role, the Batch task role and
+              # the AgentCore runtime role — which is what this role's own cfn_nag
+              # suppression above asserts ("sts:AssumeRole targets this deployment's own
+              # cross-account role namespaces").
+              - Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub 'arn:aws:iam::*:role/${ResourcePrefix}-*'
+        - PolicyName: DlqSend
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt Tier1CollectorDLQ.Arn
+        # Cross-Region host routes (tier1_collector.check_host_routes): DETECTION only.
+        # The collector reads the agent route table to see whether the VPC-wide route
+        # reaches a host-route database again, and flags drift on the record; the API
+        # task, which holds the route permissions Configure uses, repairs it
+        # (tools.aws.route_repair). No route write: IAM has no condition key for a
+        # route's destination, so a write grant here could repoint any route in the
+        # table. DescribeRouteTables supports no resource scoping.
+        - PolicyName: HostRouteCheck
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeRouteTables
+                Resource: '*'
+        # The member sync (failover detection): the cluster read for a database in this
+        # account (a cross-account database is read through its member role), and the
+        # failover notice on the deployment's notification topic, when there is one.
+        - PolicyName: MemberSync
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource: '*'
+              - !If
+                - HasNotificationTopic
+                - Sid: Tier1FailoverNotice
+                  Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Ref NotificationTopicArn
+                - !Ref 'AWS::NoValue'
+        # The collector updates only the member fields and the status notes it owns
+        # (writer_instance_id is written nowhere else; route_repair_needed is its
+        # host-route drift flag), plus status as the condition of its writes; never a
+        # connection-routing field (endpoint, secret_arn, host_routes ...).
+        # dynamodb:Attributes cannot tell a condition-only attribute from a written one,
+        # so listing status also lets this role SET status. The code only tests it
+        # (#st = :configured); a compromised collector could already rewrite the roles.
+        # status stays listed until a live check shows condition-only attributes are
+        # not evaluated against this key.
+        - PolicyName: RecordMemberWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:Attributes:
+                      - instance_id
+                      - status
+                      - cluster_member_roles
+                      - reader_endpoint
+                      - writer_instance_id
+                      - members_changed_at
+                      - route_repair_needed
+                      - config_log
+                      - updated_at
+                      - tier1_store_error
+                      - member_sync_failures
+                      - member_sync_failing_since
+        # The system admin audit event (cluster_failover_detected; host-route repairs
+        # are audited by the API task): the index row, the switch read, the vault object
+        # put-only (no read, no retention verb: objects take the bucket floor), the
+        # write-failure metrics, and never a write to the switch.
+        - PolicyName: AuditWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-audit'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                Condition:
+                  'ForAllValues:StringEquals':
+                    'dynamodb:LeadingKeys': [audit_settings]
+              - !If
+                - HasAuditBucket
+                - Sid: Tier1AuditVaultPut
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                  Resource: !Sub 'arn:aws:s3:::${AuditBucketName}/*'
+                - !Ref 'AWS::NoValue'
+              - Sid: Tier1AuditMetrics
+                Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': !Sub '${ResourcePrefix}/Audit'
+              - Sid: DenyAuditSettingsWrite
+                Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                Condition:
+                  'ForAnyValue:StringEquals':
+                    'dynamodb:LeadingKeys': [audit_settings]
+
+  # Dead-letter queue for the scheduled Tier 1 collector (CKV_AWS_116 / W92).
+  # EventBridge Scheduler invokes the collector asynchronously, so without a DLQ a
+  # run that fails past its retries disappears with nothing but a log line — and a
+  # metrics gap only shows up later as a hole in the Tier 1 tables.
+  Tier1CollectorDLQ:
+    Type: AWS::SQS::Queue
+    Condition: HasMetricsStore
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}-tier1-collector-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      SqsManagedSseEnabled: true
+
+  # Depth alarm on the queue above. See LearningAgentDLQAlarm for why
+  # TreatMissingData and the conditional AlarmActions are shaped this way.
+  #
+  # This is the alarm that was missing when a run of collections failed silently:
+  # the queue caught them, but nothing said so, and the gap only surfaced when
+  # someone read the queue by hand.
+  Tier1CollectorDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: HasMetricsStore
+    Properties:
+      AlarmName: !Sub '${ResourcePrefix}-tier1-collector-dlq-not-empty'
+      AlarmDescription: >-
+        Messages in the Tier 1 collector dead-letter queue. EventBridge Scheduler
+        invokes the collector asynchronously, so anything here means metrics
+        collection is silently missing for at least one instance, which later reads
+        as an unexplained hole in the Tier 1 tables. The message body carries the
+        instance_id, and the ErrorMessage attribute carries the cause.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt Tier1CollectorDLQ.QueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - HasNotificationTopic
+        - [!Ref NotificationTopicArn]
+        - !Ref 'AWS::NoValue'
+
+  Tier1CollectorFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasMetricsStore
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}-tier1-collector'
+      Runtime: python3.13
+      Architectures:
+        - arm64
+      Handler: tier1_collector.handler
+      # Every member of a cluster, four at a time, inside a budget of the remaining
+      # time minus 20 s (see tier1_collector._collect_all).
+      Timeout: 180
+      MemorySize: 256
+      # Cap concurrency (CKV_AWS_115 / W92) — scheduled metrics collector.
+      ReservedConcurrentExecutions: 20
+      # Failed async invocations land here instead of vanishing (CKV_AWS_116).
+      DeadLetterConfig:
+        TargetArn: !GetAtt Tier1CollectorDLQ.Arn
+      Role: !GetAtt Tier1CollectorRole.Arn
+      VpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds: !Ref SecurityGroupIds
+      Layers:
+        - !Ref Psycopg2Layer
+      Environment:
+        Variables:
+          DB_CONFIG_TABLE: !Ref DbConfigTable
+          RESOURCE_PREFIX: !Ref ResourcePrefix
+          TIER1_METRICS_TABLE: !Ref Tier1MetricsTable
+          TIER2_SCANS_TABLE: !Ref Tier2ScansTable
+          TIER1_RETENTION_DAYS: !Ref Tier1RetentionDays
+          CW_METRICS_NAMESPACE: !Sub '${ResourcePrefix}/Metrics'
+          AWS_REGION_NAME: !Ref AWS::Region
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopicArn
+          AGENT_PRIVATE_ROUTE_TABLE_ID: !Ref PrivateRouteTableId
+          AGENT_VPC_ID: !Ref AgentVpcId
+          # The audit vault, for the system admin events above. No retention
+          # extension: objects take the bucket's retention floor.
+          AUDIT_BUCKET: !Ref AuditBucketName
+          AUDIT_VAULT_DEFAULT: !Ref AuditVault
+          AUDIT_RETENTION_FLOOR: !Ref AuditRetentionDays
+      Code:
+        S3Bucket: !If [HasLambdaCodeBucket, !Ref LambdaCodeBucket, !Ref ReportsS3Bucket]
+        # Content-hashed key when the stager supplied one, so a redeploy actually
+        # rolls the code (CloudFormation ignores same-key S3 overwrites). Falls back
+        # to the unversioned key that build-tier1.sh uploads for local development.
+        S3Key: !If
+          - HasArtifactsVersion
+          - !Sub '_lambda/tier1_collector-${ArtifactsVersion}.zip'
+          - '_lambda/tier1_collector.zip'
+
+  # ── Database alarm notifier ────────────────────────────────────────────────
+  # The API task keeps one CloudWatch alarm per monitored database per enabled alarm
+  # (<prefix>-db-*; tools/aws/db_alarms.py). The alarms carry no actions: CloudWatch sends
+  # every state change to EventBridge, and this rule hands this install's to the
+  # notifier, which emails the notification address (SES HTML when a verified sender can
+  # reach it, else the topic's plain text). Same code bundle as the Tier 1 collector.
+  AlarmNotifierRole:
+    Type: AWS::IAM::Role
+    Condition: HasMetricsStore
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: AlarmNotifier
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The database named in the alarm (display name, engine, region).
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+              # The alarm settings and the email sender (read), and its own per-alarm
+              # send markers (the flap guard). Nothing else in the config table.
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                Condition:
+                  ForAllValues:StringLike:
+                    'dynamodb:LeadingKeys': [alarm_settings, email_sender, 'alarm_sent:*']
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ResourcePrefix}-config'
+                Condition:
+                  ForAllValues:StringLike:
+                    'dynamodb:LeadingKeys': ['alarm_sent:*']
+              # Whether SES can send (sender and recipient verified, sandbox), and the send.
+              - Effect: Allow
+                Action:
+                  - ses:GetEmailIdentity
+                  - ses:SendEmail
+                Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*'
+              - Effect: Allow
+                Action: ses:GetAccount
+                Resource: '*'          # no resource-level form
+              - !If
+                - HasNotificationTopic
+                - Effect: Allow
+                  Action: sns:Publish
+                  Resource: !Ref NotificationTopicArn
+                - !Ref 'AWS::NoValue'
+  AlarmNotifierFunction:
+    Type: AWS::Lambda::Function
+    Condition: HasMetricsStore
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}-alarm-notifier'
+      Runtime: python3.13
+      Architectures:
+        - arm64
+      Handler: alarm_notifier.handler
+      Timeout: 30
+      MemorySize: 256
+      # One alarm email per state change; a burst (every database tripping at once) is
+      # queued by the async invoke, not run 100-wide.
+      ReservedConcurrentExecutions: 5
+      Role: !GetAtt AlarmNotifierRole.Arn
+      Environment:
+        Variables:
+          RESOURCE_PREFIX: !Ref ResourcePrefix
+          DB_CONFIG_TABLE: !Ref DbConfigTable
+          AWS_REGION_NAME: !Ref AWS::Region
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopicArn
+          ALARM_EMAIL_RECIPIENT: !Ref AlarmEmailRecipient
+          OPERATOR_APP_URL: !Ref OperatorAppUrl
+      Code:
+        S3Bucket: !If [HasLambdaCodeBucket, !Ref LambdaCodeBucket, !Ref ReportsS3Bucket]
+        S3Key: !If
+          - HasArtifactsVersion
+          - !Sub '_lambda/tier1_collector-${ArtifactsVersion}.zip'
+          - '_lambda/tier1_collector.zip'
+  AlarmStateChangeRule:
+    Type: AWS::Events::Rule
+    Condition: HasMetricsStore
+    Properties:
+      Name: !Sub '${ResourcePrefix}-db-alarm-state'
+      Description: Database alarm state changes to the alarm notifier (this install's alarms only)
+      State: ENABLED
+      EventPattern:
+        source: [aws.cloudwatch]
+        detail-type: [CloudWatch Alarm State Change]
+        detail:
+          alarmName:
+            - prefix: !Sub '${ResourcePrefix}-db-'
+      Targets:
+        - Id: alarm-notifier
+          Arn: !GetAtt AlarmNotifierFunction.Arn
+  AlarmNotifierInvokePermission:
+    Type: AWS::Lambda::Permission
+    Condition: HasMetricsStore
+    Properties:
+      FunctionName: !Ref AlarmNotifierFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AlarmStateChangeRule.Arn
+  # psycopg2-binary Lambda layer (built from pip install)
+  Psycopg2Layer:
+    Type: AWS::Lambda::LayerVersion
+    Condition: HasMetricsStore
+    Properties:
+      LayerName: !Sub '${ResourcePrefix}-psycopg2'
+      Description: psycopg2-binary for Python 3.13 (arm64)
+      CompatibleRuntimes:
+        - python3.13
+      CompatibleArchitectures:
+        - arm64
+      Content:
+        S3Bucket: !If [HasLambdaCodeBucket, !Ref LambdaCodeBucket, !Ref ReportsS3Bucket]
+        # Same content-hashing rationale as the tier1 collector above: a LayerVersion
+        # is immutable, so an unchanged S3 key yields no new version on redeploy.
+        S3Key: !If
+          - HasArtifactsVersion
+          - !Sub '_lambda/psycopg2-layer-${ArtifactsVersion}.zip'
+          - '_lambda/psycopg2-layer.zip'
+
+  # EventBridge Scheduler role for Tier 1 schedules
+  Tier1SchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: HasMetricsStore
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeTier1Lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt Tier1CollectorFunction.Arn
+
+  # ─── AWS Batch: Shell Script Scan Jobs ────────────────────────────────────────
+
+  # ECS task EXECUTION role (Fargate infrastructure identity): pulls the container image
+  # and ships the container's stdout/stderr to CloudWatch via the awslogs driver. It holds
+  # NO application grants. The scan's own code runs under BatchJobRole below. Splitting the
+  # two means the execution identity cannot touch Secrets Manager, DynamoDB, S3, Bedrock,
+  # or assume cross-account roles, and a compromised scan process cannot borrow the
+  # image-pull identity.
+  BatchExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+
+  # Batch JOB role (the scan process's application identity, JobRoleArn on the job
+  # definition). Holds every runtime grant the scan needs; the image-pull/log identity is
+  # BatchExecutionRole above.
+  BatchJobRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              sts:AssumeRole targets cross-account roles in member accounts not
+              known at deploy time; S3 is bucket-scoped and Secrets Manager is
+              scoped to this account's own namespaces. The scan job reads the
+              secret, assumes the cross-account role, and writes its report only.
+      checkov:
+        skip:
+          - id: CKV_AWS_111
+            comment: "Cross-account roles unknown at deploy time; S3 and Secrets Manager are scoped."
+          - id: CKV_AWS_107
+            comment: "Secrets Manager is scoped to this account's <prefix>/* and metrics-store secrets."
+          - id: CKV_AWS_108
+            comment: "No exfiltration path; the job writes only its own report to the scoped bucket."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Same-account secrets only: the batch job's OWN role reads this
+              # account's <prefix>/* customer secrets; CROSS-account
+              # customer secrets are read via the assumed cross-account role
+              # (get_db_credentials in run_scan.py), not this role. Mirrors the api.yaml
+              # ECS task-role scoping.
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:*:${AWS::AccountId}:secret:${ResourcePrefix}/*'
+        - PolicyName: CrossAccountAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Scoped to the product's own cross-account role namespaces
+              # (<ResourcePrefix>-* covers discovery roles + per-space roles),
+              # not any role in any account. Mirrors the api.yaml task role.
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub 'arn:aws:iam::*:role/${ResourcePrefix}-*'
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ReportsS3Bucket}/*'
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # The scan only stamps its OWN status fields back onto the registry
+              # (update_dynamodb in run_scan.py: last_scan_at, last_health_score,
+              # updated_at). The routing/identity fields that decide where a scan
+              # connects (endpoint, secret_arn, reach_role_arn, ...)
+              # are set exclusively by the admin Configure flow, NEVER by a scan. This
+              # dynamodb:Attributes condition holds the scan's UpdateItem to exactly those
+              # status attributes (plus the instance_id key), so a compromised scan
+              # container cannot plant a rogue connection target on any row and redirect
+              # another database's next scan to a server it controls. It restricts which
+              # ATTRIBUTES may be written, not which row, so a compromised job could still
+              # stamp a cosmetic status field onto another database's row (corrected on
+              # that row's next scan; the real scan results live in the Tier 2 table) -- but
+              # it cannot write anything that redirects a connection. GetItem is a separate,
+              # unconditioned statement: the scan reads its own row before scanning.
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+                Condition:
+                  ForAllValues:StringEquals:
+                    dynamodb:Attributes:
+                      - instance_id
+                      - last_scan_at
+                      - last_health_score
+                      - updated_at
+                      # Per-reader outcome of the reader leg (run_reader_leg): status
+                      # only, shown in the members view; never read to route a scan.
+                      - reader_scan_outcomes
+                      # Why this job's writer scan failed (record_scan_failure): status
+                      # only, shown as the failed job's reason; never read to route a scan.
+                      - last_scan_error
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DbConfigTable}'
+        - PolicyName: SNSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: '*'
+        # The live cluster members at job start (run_scan.refresh_members) for a
+        # database in this account; a cross-account database is read through its
+        # member role. Read-only, clusters in this account only.
+        - PolicyName: ClusterMembersRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                Resource: !Sub 'arn:aws:rds:*:${AWS::AccountId}:cluster:*'
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  # The scan's analysis leg attaches the guardrail to its invoke_model
+                  # call, which requires this alongside the invoke action. Shares the '*'
+                  # resource for the same reason as the runtime role: the guardrail id
+                  # arrives as a parameter and is empty on a partial deploy.
+                  - bedrock:ApplyGuardrail
+                Resource: '*'
+        # The metrics store, WRITE side: the scan puts its summary and section items into
+        # the Tier 2 table and publishes the daily numerics. No read on either table and
+        # no GetMetricData, so a compromised scan container cannot read scan history
+        # across the fleet. PutMetricData is pinned to this deployment's namespace.
+        - PolicyName: MetricsStoreWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Tier2ScansTable}'
+              - Effect: Allow
+                Action: cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    cloudwatch:namespace: !Sub '${ResourcePrefix}/Metrics'
+
+  BatchComputeEnvironment:
+    Type: AWS::Batch::ComputeEnvironment
+    Properties:
+      ComputeEnvironmentName: !Sub '${ResourcePrefix}-scan'
+      Type: MANAGED
+      State: ENABLED
+      ComputeResources:
+        Type: FARGATE
+        MaxvCpus: 16
+        Subnets: !Ref SubnetIds
+        # Dedicated egress-scoped group, NOT the shared private-workload group.
+        SecurityGroupIds:
+          - !Ref ScanSecurityGroupId
+
+  BatchJobQueue:
+    Type: AWS::Batch::JobQueue
+    Properties:
+      JobQueueName: !Sub '${ResourcePrefix}-scan-queue'
+      State: ENABLED
+      Priority: 1
+      ComputeEnvironmentOrder:
+        - Order: 1
+          ComputeEnvironment: !Ref BatchComputeEnvironment
+
+  BatchJobDefinition:
+    Type: AWS::Batch::JobDefinition
+    Properties:
+      JobDefinitionName: !Sub '${ResourcePrefix}-scan'
+      Type: container
+      # Hard outer bound so a hung or runaway scan cannot run indefinitely against a
+      # production database. Tier-2 scans legitimately take up to ~10 min, so 30 min
+      # leaves ample headroom while still killing a stuck job. Per-query bounds are set
+      # via PGOPTIONS in run_scan.py.
+      Timeout:
+        AttemptDurationSeconds: 1800
+      PlatformCapabilities:
+        - FARGATE
+      ContainerProperties:
+        Image: !Ref BatchImageUri
+        ResourceRequirements:
+          - Type: VCPU
+            Value: '1'
+          - Type: MEMORY
+            Value: '2048'
+        RuntimePlatform:
+          CpuArchitecture: ARM64
+          OperatingSystemFamily: LINUX
+        ExecutionRoleArn: !GetAtt BatchExecutionRole.Arn
+        JobRoleArn: !GetAtt BatchJobRole.Arn
+        NetworkConfiguration:
+          # No public IP: the task runs in a private subnet and reaches AWS via the
+          # VPC endpoints + NAT, exactly like the ECS API task. Image pulls resolve through
+          # the ECR interface endpoints + the S3 gateway endpoint.
+          AssignPublicIp: DISABLED
+        Environment:
+          - Name: AWS_REGION
+            Value: !Ref AWS::Region
+          - Name: REPORTS_S3_BUCKET
+            Value: !Ref ReportsS3Bucket
+          - Name: RESOURCE_PREFIX
+            Value: !Ref ResourcePrefix
+          - Name: DB_CONFIG_TABLE
+            Value: !Ref DbConfigTable
+          - Name: NOTIFICATION_TOPIC_ARN
+            Value: !Ref NotificationTopicArn
+          - Name: AGENT_MODEL_ID
+            Value: !Ref AgentModelId
+          # The scan's analysis leg feeds an HTML report — database-derived text — into
+          # Bedrock via a raw invoke_model call, so it needs the guardrail for the same
+          # reason the agent paths do. run_scan._guardrail_kwargs reads these three.
+          #
+          # No input-screening pair here: the batch job has no user turn to screen. Its
+          # input is scan output, and database-derived content is deliberately not
+          # filtered on the way in (see the accepted threats in ARCHITECTURE.md) — the
+          # egress screening this guardrail applies to the model's response is the
+          # control that matters for it.
+          - Name: GUARDRAIL_ID
+            Value: !Ref GuardrailId
+          - Name: GUARDRAIL_VERSION
+            Value: !Ref GuardrailVersion
+          - Name: GUARDRAIL_ENFORCE
+            Value: !Ref GuardrailEnforce
+          - Name: TIER1_METRICS_TABLE
+            Value: !Ref Tier1MetricsTable
+          - Name: TIER2_SCANS_TABLE
+            Value: !Ref Tier2ScansTable
+          - Name: CW_METRICS_NAMESPACE
+            Value: !Sub '${ResourcePrefix}/Metrics'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Sub '/aws/batch/${ResourcePrefix}-scan'
+            awslogs-region: !Ref AWS::Region
+            awslogs-stream-prefix: scan
+
+  BatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/batch/${ResourcePrefix}-scan'
+      RetentionInDays: 30
+
+Outputs:
+  # The principals that assume the customer-installed discovery role. Paste these into the
+  # member-account role's trust policy aws:PrincipalArn condition (or a pattern covering
+  # them) to narrow its trust from "any role in the management account" to exactly these.
+  # They carry CloudFormation-generated names, so read them here rather than guessing a
+  # prefix. The API stack's ECS task role also assumes, for the access pre-flight —
+  # see the ApiTaskRoleArn output on that stack.
+  AssumeRolePrincipalArns:
+    Description: >
+      Comma-separated role ARNs in this account that assume the cross-account discovery
+      role. Use to narrow the aws:PrincipalArn condition in the member-account role's trust policy.
+    Value: !If
+      - HasMetricsStore
+      - !Join [',', [!GetAtt RuntimeExecutionRole.Arn, !GetAtt BatchJobRole.Arn, !GetAtt Tier1CollectorRole.Arn]]
+      - !Join [',', [!GetAtt RuntimeExecutionRole.Arn, !GetAtt BatchJobRole.Arn]]
+
+  RuntimeArn:
+    Description: AgentCore Runtime ARN
+    Value: !GetAtt AgentRuntime.AgentRuntimeArn
+
+  MemoryId:
+    Description: AgentCore Memory resource ID (passed to the runtime as MEMORY_ID)
+    Value: !GetAtt AgentMemory.MemoryId
+
+  MemoryArn:
+    Description: AgentCore Memory resource ARN
+    Value: !GetAtt AgentMemory.MemoryArn
+
+  ScanTriggerFunctionArn:
+    Description: Lambda function ARN for scan triggers
+    Value: !GetAtt ScanTriggerFunction.Arn
+
+  BatchJobQueueArn:
+    Description: Batch Job Queue ARN for scan jobs
+    Value: !GetAtt BatchJobQueue.JobQueueArn
+
+  BatchJobDefinitionArn:
+    Description: Batch Job Definition ARN
+    Value: !Ref BatchJobDefinition
+
+  LearningAgentFunctionArn:
+    Description: Learning Agent Lambda ARN
+    Value: !GetAtt LearningAgentFunction.Arn
+
+  SchedulerRoleArn:
+    Description: EventBridge Scheduler role ARN (for per-database schedules)
+    Value: !GetAtt SchedulerRole.Arn
+
+  ScanTriggerDLQArn:
+    Description: Dead-letter queue ARN for the Tier 2 scan-trigger schedules
+    Value: !GetAtt ScanTriggerDLQ.Arn
+
+  Tier1CollectorFunctionArn:
+    Condition: HasMetricsStore
+    Description: Tier 1 metrics collector Lambda ARN
+    Value: !GetAtt Tier1CollectorFunction.Arn
+
+  Tier1SchedulerRoleArn:
+    Condition: HasMetricsStore
+    Description: EventBridge Scheduler role ARN for Tier 1 schedules
+    Value: !GetAtt Tier1SchedulerRole.Arn
+
+  WebSearchGatewayUrl:
+    Condition: EnableWebSearchCond
+    Description: AgentCore Web Search Gateway MCP URL (set as WEB_SEARCH_GATEWAY_URL on the runtime)
+    Value: !GetAtt WebSearchGateway.GatewayUrl

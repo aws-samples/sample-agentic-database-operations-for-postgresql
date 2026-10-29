@@ -1,0 +1,38 @@
+Audit
+Every privileged admin action, newest first. While the vault is on, records are locked in S3 Object Lock (COMPLIANCE) for 365 days.
+Write records to the locked vault
+Every admin action is also written once to S3 Object Lock (COMPLIANCE): nobody, including the account root user, can change or delete it before it expires.
+Retention (days)
+Save
+Applies to new records. Can be set from 365 (the deploy minimum) to 3653; going below 365 needs a redeploy with a lower AUDIT_RETENTION_DAYS. Other servers pick up a change within 30 seconds.
+Using deploy defaults
+Audit log
+Every privileged admin action in this deployment, newest first. Vault on: new records are locked for 365 days.
+24 h
+7 d
+30 d
+90 d
+All
+Custom
+All actions
+Created space
+Changed space details
+Deleted space
+Finished deleting space
+Validated account access
+Ran discovery
+Dismissed discovered database
+Onboarded database
+Removed database from space
+Finished removing database
+Database removal incomplete
+Detected cluster failover
+Repaired cross-Region host routes
+Added operator
+Removed operator
+Switched audit vault
+All spaces
+Account-level only
+Other space id…
+0 events
+No admin actions recorded yet.

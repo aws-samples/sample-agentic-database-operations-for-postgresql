@@ -1,0 +1,19 @@
+Add secondary cloud source
+Connect another AWS account to this Agent Space: your access role must be in that account, then register the account here.
+1
+Set up the role
+2
+Connect to the Agent Space
+Secondary account ID *
+The AWS account that holds the databases.
+Role name
+Use a different name
+Your access role. One per account, shared by all your spaces.
+dbops-agent-admina000000 is in account 444444444444 (your space Orders validated it), but its trust policy no longer accepts this deployment. In that account, re-apply the trust policy with the command below: it trusts roles in account 111122223333 with sts:ExternalId admin-a-00000000-4000-8000-000000000002.
+Re-apply the trust policy in account 444444444444
+Copy command
+aws iam update-assume-role-policy \
+--role-name dbops-agent-admina000000 \
+--policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111122223333:root"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"sts:ExternalId":"admin-a-00000000-4000-8000-000000000002"},"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::111122223333:role/*"}}}]}'
+Cancel
+Next

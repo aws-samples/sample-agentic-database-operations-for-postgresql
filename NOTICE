@@ -1,1 +1,50 @@
+DB Ops Agent
+
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Licensed under the Apache License Version 2.0 (the "License"). You may not use this
+file except in compliance with the License. A copy of the License is located at
+https://www.apache.org/licenses/ or in the "LICENSE" file accompanying this file.
+This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
+ANY KIND, express or implied. See the License for the specific language governing
+permissions and limitations under the License.
+
+**********************
+THIRD PARTY COMPONENTS
+**********************
+This software includes third party software subject to the following copyrights.
+
+The list below covers the dependencies this software declares directly. Those
+dependencies bring their own, which are pinned in backend/requirements.txt and in
+the committed package-lock.json files and carry their own licenses.
+
+@types/react under the MIT License
+@types/react-dom under the MIT License
+@vitejs/plugin-react under the MIT License
+autoprefixer under the MIT License
+bedrock-agentcore under the Apache License 2.0
+boto3 under the Apache License 2.0
+cryptography under the Apache License 2.0 OR the BSD-3-Clause License
+fastapi under the MIT License
+jwt-decode under the MIT License
+mcp-proxy-for-aws under the Apache License 2.0
+postcss under the MIT License
+psycopg2-binary under the GNU Lesser General Public License with exceptions
+pypdf under the BSD License
+python-dotenv under the BSD-3-Clause License
+PyJWT under the MIT License
+PyYAML under the MIT License
+qrcode.react under the ISC License
+react under the MIT License
+react-dom under the MIT License
+react-markdown under the MIT License
+remark-gfm under the MIT License
+strands-agents under the Apache License 2.0
+strands-agents-tools under the Apache License 2.0
+tailwindcss under the MIT License
+uvicorn under the BSD-3-Clause License
+vite under the MIT License
+
+The Nunito Sans typeface (frontend/public/fonts, admin-console/public/fonts) is
+Copyright 2016 The Nunito Sans Project Authors and is licensed under the SIL Open
+Font License, Version 1.1; the license text ships alongside the font files as
+OFL.txt.

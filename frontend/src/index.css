@@ -1,0 +1,690 @@
+/*
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Self-hosted Nunito Sans (SIL Open Font License 1.1, see public/fonts/OFL.txt):
+   one variable file per style, latin subset, served from this origin so the
+   bundle makes no third-party font requests. */
+@font-face {
+  font-family: 'Nunito Sans';
+  font-style: normal;
+  font-weight: 200 1000;
+  font-display: swap;
+  src: url('/fonts/NunitoSans-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Nunito Sans';
+  font-style: italic;
+  font-weight: 200 1000;
+  font-display: swap;
+  src: url('/fonts/NunitoSans-latin-italic.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+html,
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  /* UI text carries a hair of tracking. */
+  letter-spacing: 0.15px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  background-color: var(--app-bg);
+  color: var(--text);
+}
+code, pre, kbd, samp, .font-mono { font-family: var(--font-mono); letter-spacing: 0; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   THEME TOKENS — one value set per theme.
+   Each theme is just a set of variable values. Components keep using the same
+   Tailwind utilities (bg-surface, text-fg, bg-primary); the
+   mappings further down route those utilities to these tokens, so re-skinning
+   the app is a matter of editing the two blocks below.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Typography. Nunito Sans is bundled (see the @font-face rules above); the
+     system chain covers the glyphs outside its latin subset. */
+  --font-sans: 'Nunito Sans', 'Helvetica Neue', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: 'SF Mono', Monaco, Menlo, Consolas, monospace;
+
+  /* Surfaces */
+  --app-bg: #fafafa;          /* page canvas */
+  --nav-bg: #f9f9fb;          /* left rail, top bar, side panels */
+  --topbar: var(--nav-bg);
+  --surface: #ffffff;         /* cards, menus, composer */
+  --surface-2: #f9fafb;       /* inset panels, table heads */
+  --surface-3: #f3f4f6;       /* hover */
+  --surface-active: #e5e7eb;  /* pressed / selected neutral */
+  --code-bg: #f4f4f5;
+  --code-text: #24292e;
+  --surface-code: var(--code-bg);
+
+  /* Text */
+  --text: #131920;
+  --text-2: #5e5e5e;
+  --text-3: #656871;
+  --text-muted: #9ca3af;
+
+  /* Borders */
+  --border: rgba(0, 0, 0, 0.12);
+  --border-2: rgba(0, 0, 0, 0.06);
+  --border-strong: #d1d5db;
+
+  /* Accent — the default Teal. The interactive primary family (buttons, links,
+     focus rings, selected washes) plus the dual-tone brand pair. The other two
+     accents override these in the [data-accent] blocks further down. */
+  --primary: #0f766e;
+  --primary-hover: #115e59;
+  --primary-fg: #ffffff;          /* text on a solid primary fill */
+  --primary-light: #2dd4bf;
+  --primary-wash: #f0fdfa;
+  --primary-subtle: color-mix(in srgb, var(--primary) 12%, transparent);
+  --primary-border: color-mix(in srgb, var(--primary) 30%, transparent);
+  --accent: var(--primary);
+  --ring: var(--primary);
+  /* Brand identity for the logo tile, avatars and the sparkle: two distinct
+     hues, teal sweeping into indigo, the same in both modes so a white glyph
+     stays legible on the tile. The SVG sparkle reads the same two tokens. */
+  --brand-a: #14b8a6;
+  --brand-b: #6366f1;
+  --brand-gradient: linear-gradient(135deg, var(--brand-a) 0%, var(--brand-b) 100%);
+
+  /* Chat */
+  --user-bubble: #f4f4f5;
+  --user-bubble-text: #131920;
+
+  /* Inputs */
+  --input-bg: #ffffff;
+  --input-border: #d1d5db;
+
+  /* Elevation */
+  --elev: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --elev-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+
+  /* Status. `-fg` is the solid hue (icons, dots, emphasis); `-text` is the
+     dark-on-wash text that pairs with `-bg`. Hue is semantic — amber always
+     means needs-attention — so only lightness changes per theme. */
+  --warn-fg: #f2b100;
+  --warn-fg-2: #db9200;
+  --warn-text: #573a00;
+  --warn-inverse: #573a00;     /* text on a solid amber fill */
+  --warn-bg: #fef7e6;
+  --warn-bg-2: #fffbbd;
+  --warn-hover: color-mix(in srgb, var(--warn-fg) 16%, var(--surface));
+  --warn-border: #f9dfa3;
+
+  --ok-fg: #00802f;
+  --ok-text: #00471e;
+  --ok-bg: #e6f5eb;
+  --ok-bg-2: #d9ffd6;
+  --ok-hover: color-mix(in srgb, var(--ok-fg) 16%, var(--surface));
+  --ok-border: #b3d9bf;
+
+  --err-fg: #db0000;
+  --err-text: #700000;
+  --err-bg: #fceaea;
+  --err-bg-2: #ffe0e0;
+  --err-hover: color-mix(in srgb, var(--err-fg) 16%, var(--surface));
+  --err-border: #f2cccc;
+
+  --info-fg: #006ce0;
+  --info-text: #002a66;
+  --info-bg: #ebf3fc;
+  --info-bg-2: #d1f1ff;
+  --info-hover: color-mix(in srgb, var(--info-fg) 16%, var(--surface));
+  --info-border: #b3d1f0;
+
+  /* Categorical violet — the trace/topology views use it to tell sub-agent
+     tooling apart from the info blue and the teal accent. (The token is named
+     "cyan" for compatibility with the classes that read it; its value is violet.) */
+  --cat-cyan: #7c3aed;
+  --cat-cyan-bg: #f5f3ff;
+  --cat-cyan-border: #ddd6fe;
+}
+
+[data-theme="dark"],
+[data-theme="graphite"] {
+  color-scheme: dark;
+
+  --app-bg: #111113;
+  --nav-bg: #18181b;
+  --surface: #18181b;
+  --surface-2: #1c1c1f;
+  --surface-3: #27272a;
+  --surface-active: #2e2e33;
+  --code-bg: #1c1c1f;
+  --code-text: #e4e4e7;
+
+  --text: #e4e4e7;
+  --text-2: #a1a1aa;
+  --text-3: #8b8b94;
+  --text-muted: #6f6f78;
+
+  --border: rgba(255, 255, 255, 0.12);
+  --border-2: rgba(255, 255, 255, 0.06);
+  --border-strong: #3f3f46;
+
+  /* Primary boosts to the lighter teal so it stays legible on dark surfaces.
+     A solid fill carries dark ink (white on the turquoise is under 2:1) and
+     brightens, rather than deepens, on hover. */
+  --primary: #2dd4bf;
+  --primary-hover: #5eead4;
+  --primary-fg: #042f2e;
+  --primary-light: #2dd4bf;
+  --primary-wash: color-mix(in srgb, var(--primary) 15%, transparent);
+  --primary-subtle: color-mix(in srgb, var(--primary) 25%, transparent);
+  --primary-border: color-mix(in srgb, var(--primary) 50%, transparent);
+
+  --user-bubble: #2e2e33;
+  --user-bubble-text: #e4e4e7;
+
+  --input-bg: #18181b;
+  --input-border: #3f3f46;
+
+  --elev: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --elev-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+
+  /* Status washes are translucent tints over this theme's own surface, so a
+     highlighted row reads as a shade of the table rather than a pale card. */
+  --warn-fg: #fbbf24;
+  --warn-fg-2: #fbbf24;
+  --warn-text: #fbbf24;
+  --warn-inverse: #573a00;
+  --warn-bg: color-mix(in srgb, var(--warn-fg) 12%, transparent);
+  --warn-bg-2: color-mix(in srgb, var(--warn-fg) 18%, transparent);
+  --warn-hover: color-mix(in srgb, var(--warn-fg) 16%, transparent);
+  --warn-border: color-mix(in srgb, var(--warn-fg) 35%, transparent);
+
+  --ok-fg: #4ade80;
+  --ok-text: #4ade80;
+  --ok-bg: color-mix(in srgb, var(--ok-fg) 12%, transparent);
+  --ok-bg-2: color-mix(in srgb, var(--ok-fg) 18%, transparent);
+  --ok-hover: color-mix(in srgb, var(--ok-fg) 16%, transparent);
+  --ok-border: color-mix(in srgb, var(--ok-fg) 35%, transparent);
+
+  --err-fg: #ff6b6b;
+  --err-text: #ff6b6b;
+  --err-bg: color-mix(in srgb, var(--err-fg) 12%, transparent);
+  --err-bg-2: color-mix(in srgb, var(--err-fg) 18%, transparent);
+  --err-hover: color-mix(in srgb, var(--err-fg) 16%, transparent);
+  --err-border: color-mix(in srgb, var(--err-fg) 35%, transparent);
+
+  --info-fg: #60a5fa;
+  --info-text: #60a5fa;
+  --info-bg: color-mix(in srgb, var(--info-fg) 12%, transparent);
+  --info-bg-2: color-mix(in srgb, var(--info-fg) 18%, transparent);
+  --info-hover: color-mix(in srgb, var(--info-fg) 16%, transparent);
+  --info-border: color-mix(in srgb, var(--info-fg) 35%, transparent);
+
+  --cat-cyan: #a78bfa;
+  --cat-cyan-bg: color-mix(in srgb, var(--cat-cyan) 12%, transparent);
+  --cat-cyan-border: color-mix(in srgb, var(--cat-cyan) 35%, transparent);
+}
+
+/* Graphite — the dark palette on a neutral, slightly-lifted charcoal rather than
+   near-black zinc. Only the surfaces move; text, status hues and the whole accent
+   family are inherited from the dark block above (Graphite is grouped into it),
+   so this is a background mode, not a new palette. */
+[data-theme="graphite"] {
+  --app-bg: #1c1d20;
+  --nav-bg: #232428;
+  --surface: #232428;
+  --surface-2: #27282c;
+  --surface-3: #303136;
+  --surface-active: #3a3b40;
+  --code-bg: #27282c;
+  --user-bubble: #3a3b40;
+  --input-bg: #232428;
+  --input-border: #45464c;
+  --border-strong: #4a4b52;
+}
+
+/* Paper — the light palette on a warm off-white rather than cool grey-white.
+   Only the surfaces and the input/code backgrounds move to a cream tone; text,
+   status hues and the accent family inherit from the light base (:root) above,
+   so this too is a background mode, not a new palette. */
+[data-theme="paper"] {
+  --app-bg: #f5f1e8;
+  --nav-bg: #f1ece1;
+  --surface: #fdfbf6;
+  --surface-2: #f7f2e9;
+  --surface-3: #efe9db;
+  --surface-active: #e7e0cf;
+  --code-bg: #f2ede2;
+  --user-bubble: #f2ede2;
+  --input-bg: #fdfbf6;
+  --input-border: #d9d0bd;
+  --border: rgba(60, 50, 25, 0.14);
+  --border-2: rgba(60, 50, 25, 0.07);
+  --border-strong: #cdbfa6;
+}
+
+.dark { color-scheme: dark; }
+
+/* ── Accents ─────────────────────────────────────────────────────────────────
+   Three dual-tone accents, picked separately for light and dark. useTheme.js
+   sets `data-accent` on <html> to the choice for the mode that is showing;
+   Teal is the default declared in the theme blocks above and needs no block
+   here. An accent moves only the primary family and the brand pair — the
+   status hues (amber/green/red/blue) keep their meaning and never follow it.
+   The derived washes (--primary-subtle, --primary-border, the dark
+   --primary-wash) are color-mix() of --primary, so they follow automatically.
+   The same ids and swatches are listed in useTheme.js for the picker. */
+[data-theme="light"][data-accent="blue"],
+[data-theme="paper"][data-accent="blue"] {
+  --primary: #1d4ed8;
+  --primary-hover: #1e40af;
+  --primary-light: #60a5fa;
+  --primary-wash: #eff6ff;
+  --brand-a: #0ea5e9;
+  --brand-b: #1d4ed8;
+}
+[data-theme="dark"][data-accent="blue"],
+[data-theme="graphite"][data-accent="blue"] {
+  --primary: #60a5fa;
+  --primary-hover: #93c5fd;
+  --primary-fg: #172554;
+  --primary-light: #60a5fa;
+  --brand-a: #0ea5e9;
+  --brand-b: #1d4ed8;
+}
+[data-theme="light"][data-accent="plum"],
+[data-theme="paper"][data-accent="plum"] {
+  --primary: #a21caf;
+  --primary-hover: #86198f;
+  --primary-light: #e879f9;
+  --primary-wash: #fdf4ff;
+  --brand-a: #d946ef;
+  --brand-b: #f43f5e;
+}
+[data-theme="dark"][data-accent="plum"],
+[data-theme="graphite"][data-accent="plum"] {
+  --primary: #e879f9;
+  --primary-hover: #f0abfc;
+  --primary-fg: #4a044e;
+  --primary-light: #e879f9;
+  --brand-a: #d946ef;
+  --brand-b: #f43f5e;
+}
+
+/* ── Background patterns ─────────────────────────────────────────────────────
+   A third, orthogonal axis set by data-pattern on <html> (see useTheme.js). The
+   texture paints on the app canvas (.bg-canvas = var(--app-bg), the full-height
+   app shell and content area), layered over the canvas colour and under the solid
+   --surface cards, so it shows only in the gutters, never behind a card or the
+   topology graph (which paints its own --app-bg). body itself is covered by the
+   opaque .bg-canvas shell, so the texture must target .bg-canvas, not body. The
+   ink is color-mixed from --text, so a single definition stays legible on every
+   theme. Plain is the default and needs no rule. */
+[data-pattern="lines"] .bg-canvas {
+  background-image: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--text) 8%, transparent) 0,
+    color-mix(in srgb, var(--text) 8%, transparent) 1px,
+    transparent 1px, transparent 11px);
+}
+[data-pattern="dots"] .bg-canvas {
+  background-image: radial-gradient(color-mix(in srgb, var(--text) 8%, transparent) 1px, transparent 1.6px);
+  background-size: 16px 16px;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   COMPONENT UTILITIES — small classes for the pieces Tailwind's palette
+   can't express (token-backed surfaces + the brand gradient).
+   ══════════════════════════════════════════════════════════════════════════ */
+.bg-brand-gradient { background-image: var(--brand-gradient) !important; }
+
+/* The chat composer frame: white card, hairline border,
+   24px radius, soft elevation; the border darkens on hover/focus. */
+.composer-frame {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1.5rem;
+  box-shadow: var(--elev-md);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.composer-frame:hover,
+.composer-frame:focus-within { border-color: var(--text-muted); }
+/* The composer field stays seamless with its frame (overrides the global input
+   background below). */
+.chat-composer-input { background-color: transparent !important; border: none !important; }
+
+/* Hero greeting — the accent's brand pair swept through the text, with the slow
+   20s "breathe" drift. Each stop is the brand hue mixed with a quarter of the
+   text colour, which deepens it on the light canvas and lifts it on the dark
+   one, so the thin 300-weight glyphs (the variable font's axis) stay legible
+   in every accent without a per-theme override. */
+.greeting-gradient {
+  font-weight: 300;
+  line-height: 1.2;
+  letter-spacing: 0.003rem;
+  background-image: linear-gradient(269deg,
+    color-mix(in srgb, var(--brand-b) 72%, var(--text)) 0%,
+    color-mix(in srgb, var(--brand-a) 72%, var(--text)) 100%);
+  background-size: 170% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+  animation: greeting-breathe 20s ease-in-out infinite;
+}
+@keyframes greeting-breathe {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+/* Suggestion pills. Default = lavender fill with the
+   primary border (follow-ups under an answer); .neutral = white with a hairline
+   (starter prompts on the home). Pills fade in with a per-child stagger; the
+   fill mode is `backwards` so the hover lift is not frozen by the animation. */
+.suggestion-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--primary);
+  border-radius: 20px;
+  background-color: var(--primary-wash);
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color .2s ease, color .2s ease, border-color .2s ease, transform .2s ease, box-shadow .2s ease;
+  animation: suggestion-fade-in .3s ease backwards;
+}
+.suggestion-pill:hover:not(:disabled) {
+  background-color: var(--primary);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px var(--primary-border);
+}
+.suggestion-pill:active:not(:disabled) { transform: translateY(0); }
+.suggestion-pill:disabled { opacity: .5; cursor: default; }
+.suggestion-pill svg { width: 14px; height: 14px; flex-shrink: 0; }
+.suggestion-pill.neutral {
+  background-color: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+  font-weight: 400;
+}
+.suggestion-pill.neutral:hover:not(:disabled) {
+  background-color: var(--surface);
+  border-color: var(--text-muted);
+  color: var(--text);
+  box-shadow: var(--elev-md);
+}
+.suggestion-pills > .suggestion-pill:nth-child(2) { animation-delay: .05s; }
+.suggestion-pills > .suggestion-pill:nth-child(3) { animation-delay: .10s; }
+.suggestion-pills > .suggestion-pill:nth-child(4) { animation-delay: .15s; }
+.suggestion-pills > .suggestion-pill:nth-child(5) { animation-delay: .20s; }
+.suggestion-pills > .suggestion-pill:nth-child(6) { animation-delay: .25s; }
+.suggestion-pills > .suggestion-pill:nth-child(n+7) { animation-delay: .30s; }
+@keyframes suggestion-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Brief rows — each item is its own bordered card with
+   an icon tile on the left and a chevron on the right. */
+.brief-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: var(--surface);
+  color: var(--text);
+  text-align: left;
+  transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+button.brief-row { cursor: pointer; }
+button.brief-row:hover { background-color: var(--surface-2); border-color: var(--border-strong); }
+.brief-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #ffffff;
+  background-image: var(--brand-gradient);
+}
+.brief-icon svg { width: 15px; height: 15px; }
+.brief-icon.err { background-image: none; background-color: var(--err-fg); }
+.brief-icon.warn { background-image: none; background-color: var(--warn-fg-2); }
+.brief-icon.info { background-image: none; background-color: var(--info-fg); }
+.brief-icon.ok { background-image: none; background-color: var(--ok-fg); }
+
+/* Collapsible chat slot. The outer slot owns
+   the layout width and animates it 0 <-> W so the panel area reflows smoothly;
+   the inner pane keeps its width and slides via translateX so text does not
+   reflow mid-animation. Resize drags disable the transitions so the width
+   tracks the cursor. */
+.chat-slot {
+  position: relative;
+  height: 100%;
+  flex-shrink: 0;
+  overflow: hidden;
+  transition: width .28s cubic-bezier(.22, 1, .36, 1);
+}
+.chat-slot--fill { flex: 1 1 0%; min-width: 0; }
+.chat-pane {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(0);
+  transition: transform .28s cubic-bezier(.22, 1, .36, 1);
+}
+.chat-slot--closed .chat-pane { transform: translateX(-100%); }
+.chat-slot--resizing,
+.chat-slot--resizing .chat-pane,
+.chat-head-slot--resizing { transition: none !important; }
+.chat-head-slot {
+  flex-shrink: 0;
+  transition: width .28s cubic-bezier(.22, 1, .36, 1);
+}
+/* Clip only while a panel is open and the header folds with the pane. With no
+   panel the slot fills the row and hosts the appearance and notification menus,
+   whose dropdowns must be free to hang below the 44px header. */
+.chat-head-slot--fold { overflow: hidden; }
+
+/* The gradient sparkle launcher shown bottom-left when the chat is collapsed. */
+.chat-launcher {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  z-index: 30;
+  width: 48px;
+  height: 48px;
+  border-radius: 9999px;
+  background-image: var(--brand-gradient);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 6px 18px rgba(104, 66, 255, 0.35);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.chat-launcher:hover { transform: translateY(-1px) scale(1.04); box-shadow: 0 8px 22px rgba(104, 66, 255, 0.45); }
+.chat-launcher:active { transform: scale(0.98); }
+.chat-launcher-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background-color: var(--err-fg);
+  border: 2px solid var(--app-bg);
+}
+
+/* "Inverted" tabs: a white tray, a grey selected tab. */
+.tabs-inverted {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  background-color: var(--surface);
+  border: 1px solid var(--border-2);
+}
+.tabs-inverted > .tab {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: background-color .15s ease, color .15s ease;
+}
+.tabs-inverted > .tab:hover { background-color: var(--surface-3); color: var(--text); }
+.tabs-inverted > .tab[aria-selected="true"] { background-color: var(--surface-active); color: var(--text); font-weight: 500; }
+
+/* Quiet disclaimer under the chat: one muted line. */
+.chat-footer {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 6px 16px 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .greeting-gradient, .suggestion-pill { animation: none; }
+  .chat-slot, .chat-pane, .chat-head-slot, .chat-launcher { transition: none; }
+}
+
+/* Inputs (not checkboxes/radios) */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+select,
+textarea {
+  background-color: var(--input-bg);
+  border-color: var(--input-border);
+  color: var(--text);
+}
+input::placeholder,
+textarea::placeholder { color: var(--text-muted); opacity: 1; }
+
+/* Shadows — mute for dark. */
+.dark .shadow-sm { box-shadow: var(--elev) !important; }
+.dark .shadow-md { box-shadow: var(--elev-md) !important; }
+.dark .shadow-lg { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.4) !important; }
+.dark .shadow-xl { box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5) !important; }
+
+/* Code blocks */
+code { background-color: var(--code-bg); color: var(--code-text); }
+pre { background-color: var(--code-bg); color: var(--code-text); }
+pre code { background: none; color: inherit; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   CHAT MARKDOWN (.prose) — token-aware so it tracks every theme.
+   ══════════════════════════════════════════════════════════════════════════ */
+.prose table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.75rem;
+  margin: 0.5rem 0;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.prose thead th {
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-weight: 600;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  font-size: 0.7rem;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.prose tbody td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--border-2);
+  color: var(--text-2);
+  font-size: 0.7rem;
+  vertical-align: top;
+}
+.prose tbody tr:hover td { background: var(--surface-2); }
+.prose tbody tr:last-child td { border-bottom: none; }
+.prose code {
+  background: var(--code-bg);
+  border: 1px solid var(--border-2);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  color: var(--code-text);
+  font-weight: 500;
+}
+.prose pre {
+  background: var(--code-bg);
+  color: var(--code-text);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.7rem;
+  margin: 0.5rem 0;
+}
+.prose pre code { background: none; border: none; color: inherit; padding: 0; }
+.prose a { color: var(--primary); }
+.prose strong { color: var(--text); font-weight: 600; }
+.prose h1, .prose h2, .prose h3 {
+  color: var(--text);
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+.prose ul, .prose ol { margin: 0.25rem 0; padding-left: 1.25rem; }
+.prose li { margin: 0.1rem 0; }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PROFESSIONAL POLISH (theme-aware)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Smooth theme + hover transitions (motion-safe). */
+@media (prefers-reduced-motion: no-preference) {
+  button, a, input, select, textarea,
+  [class*="hover:"], [class*="rounded"] {
+    transition: background-color .15s ease, border-color .15s ease,
+                color .15s ease, box-shadow .15s ease, opacity .15s ease;
+  }
+}
+
+/* Branded keyboard focus ring. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Thin, unobtrusive scrollbars. */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* Soft card elevation, scoped to rounded panels (not inputs/pills). */
+.bg-surface.rounded-lg,
+.bg-surface.rounded-xl,
+.bg-surface.rounded-2xl { box-shadow: var(--elev); }

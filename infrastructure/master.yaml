@@ -1,0 +1,983 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DBOps Agent - One-click deployment (nested stack orchestrator)
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Container Images
+        Parameters:
+          - ResourcePrefix
+          - BackendImageUri
+          - BatchImageUri
+      - Label:
+          default: Configuration
+        Parameters:
+          - AgentModelId
+          - NotificationEmail
+          - InitialAdminEmail
+          - InitialAdminName
+          - EmailSenderAddress
+          - EmailSenderName
+      - Label:
+          default: Metrics store
+        Parameters:
+          - Tier1RetentionDays
+      - Label:
+          default: Security (optional)
+        Parameters:
+          - EnableWAF
+          - EnableCloudTrail
+          - EnableCognitoThreatProtection
+          - BudgetLimitAmount
+          - JwtSignatureVerification
+          - DbPortRange
+          - SameRegionConnectivity
+          - AuditVault
+          - AuditRetentionDays
+      - Label:
+          default: Guardrails (Bedrock)
+        Parameters:
+          - EnableGuardrail
+          - GuardrailContentStrength
+          - GuardrailPromptAttackStrength
+          - GuardrailPiiAction
+          - GuardrailThrottleAlarmThreshold
+          - GuardrailInterventionAlarmThreshold
+      - Label:
+          default: Research agent (web search)
+        Parameters:
+          - EnableWebSearch
+      - Label:
+          default: Advanced (defaults are fine)
+        Parameters:
+          - WebAppUrl
+          - TemplateBaseUrl
+          - ArtifactsBucket
+          - ArtifactsVersion
+          - LogRetentionDays
+          - RefreshTokenValidityDays
+          - ApiThrottleRateLimit
+          - ApiThrottleBurstLimit
+    ParameterLabels:
+      ResourcePrefix:
+        default: Resource name prefix
+      BackendImageUri:
+        default: Backend container image URI
+      BatchImageUri:
+        default: Batch scanner container image URI
+      AgentModelId:
+        default: Bedrock model ID
+      NotificationEmail:
+        default: Alert notification email (optional)
+      InitialAdminEmail:
+        default: Initial admin email
+      InitialAdminName:
+        default: Initial admin name
+      EmailSenderAddress:
+        default: Invitation sender email (optional, verified SES identity)
+      EmailSenderName:
+        default: Invitation sender display name (optional)
+      Tier1RetentionDays:
+        default: Tier 1 raw-sample retention (days)
+      EnableWAF:
+        default: Enable AWS WAF on CloudFront
+      EnableCloudTrail:
+        default: Enable a deployment-scoped CloudTrail
+      EnableCognitoThreatProtection:
+        default: Enable Cognito advanced security (Plus tier)
+      BudgetLimitAmount:
+        default: Monthly cost budget in USD (alert-only)
+      JwtSignatureVerification:
+        default: In-app JWT signature verification (off / log / enforce)
+      DbPortRange:
+        default: PostgreSQL port range the deep scan may reach (from-to)
+      SameRegionConnectivity:
+        default: Same-region database connectivity (peering-first / lattice)
+      AuditVault:
+        default: Admin audit vault (on / off, initial state)
+      AuditRetentionDays:
+        default: Admin audit retention floor (days, Object Lock)
+      EnableGuardrail:
+        default: Enable the Bedrock Guardrail
+      GuardrailContentStrength:
+        default: Content-filter strength
+      GuardrailPromptAttackStrength:
+        default: Prompt-attack detection strength
+      GuardrailPiiAction:
+        default: PII action (redact or block)
+      GuardrailThrottleAlarmThreshold:
+        default: Guardrail throttle alarm threshold (alert-only)
+      GuardrailInterventionAlarmThreshold:
+        default: Guardrail intervention alarm threshold (alert-only)
+      EnableWebSearch:
+        default: Enable managed web search (research agent)
+      WebAppUrl:
+        default: Web app URL (for admin deep-links)
+      TemplateBaseUrl:
+        default: S3 URL for nested templates
+      LogRetentionDays:
+        default: Access log retention (days)
+      RefreshTokenValidityDays:
+        default: Refresh token lifetime (days)
+      ApiThrottleRateLimit:
+        default: API throttle — requests/second
+      ApiThrottleBurstLimit:
+        default: API throttle — burst allowance
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, DynamoDB table names and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  BackendImageUri:
+    Type: String
+    Description: ECR URI for the backend agent container
+
+  BatchImageUri:
+    Type: String
+    Description: ECR URI for the batch scanner container
+
+  AgentModelId:
+    Type: String
+    Default: global.anthropic.claude-haiku-5-5
+    Description: Bedrock model ID for the AI agent
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email for critical finding alerts (optional)
+
+  Tier1RetentionDays:
+    Type: Number
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+    Description: >
+      How long the Tier 1 RAW 5-minute samples (with their table-bloat and wait-event
+      detail) are kept in the metrics store before DynamoDB's TTL removes them. The
+      per-database monitoring setting overrides this. The numeric series outlives them
+      in CloudWatch (5-minute points for 63 days, hourly for 15 months), and deep scans
+      are kept for years, so this only bounds the detail table.
+
+  EnableWAF:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Attach an AWS WAFv2 WebACL (AWS managed baseline rules + per-IP rate
+      limiting) to the dashboard and admin CloudFront distributions. Default
+      'true': these are the only public entry points to the deployment, so they
+      are protected unless you choose otherwise. Set 'false' if your own
+      org-level WAF already fronts them, or to avoid the cost - this creates one
+      WebACL per distribution, so two, each with four rules, plus per-request
+      charges. A CloudFront WebACL can only be created through the us-east-1
+      control plane, so when this deployment's Region is not us-east-1 the deploy
+      first creates the WebACLs in a small us-east-1 edge stack and passes their
+      ARNs in (FrontendWebAclArn / AdminWebAclArn); either way the distributions
+      are protected, enforced at the edge nearest the viewer.
+  FrontendWebAclArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of the dashboard CloudFront WebACL built by the us-east-1 edge stack.
+      Set by `make deploy` only when the Region is not us-east-1; empty in
+      us-east-1 (the WebACL is created inline there).
+  AdminWebAclArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of the admin console CloudFront WebACL built by the us-east-1 edge
+      stack. Set by `make deploy` only when the Region is not us-east-1; empty in
+      us-east-1 (the WebACL is created inline there).
+
+  EnableCloudTrail:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Create a CloudTrail (management events, log-file validation) scoped to
+      this deployment, writing to a dedicated encrypted S3 bucket. Default
+      'true', so an audit trail exists without anyone having to ask for one.
+      Set 'false' if an organization-level trail already covers this account:
+      AWS delivers the first copy of management events per region free, so a
+      second trail is charged per event on top of its S3 storage, and the events
+      are ones you already have. The bucket is retained on stack deletion so a
+      teardown cannot destroy the audit record.
+
+  EnableCognitoThreatProtection:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Put the Cognito user pool on the Plus tier with advanced security ENFORCED
+      (compromised-credential detection, adaptive authentication). Default 'false': the
+      Plus tier is billed per monthly active user, so it is opt-in. Mandatory MFA and the
+      sign-in rate limit apply regardless.
+
+  EnableGuardrail:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Create a Bedrock Guardrail (prompt-attack detection, PII redaction, content
+      filters) and attach it to every model call. Fail-soft: 'false' runs with no
+      guardrail.
+
+  GuardrailContentStrength:
+    Type: String
+    Default: 'LOW'
+    AllowedValues: ['NONE', 'LOW', 'MEDIUM', 'HIGH']
+    Description: Strength for content filters (hate/insults/sexual/violence/misconduct).
+
+  GuardrailPromptAttackStrength:
+    Type: String
+    Default: 'MEDIUM'
+    AllowedValues: ['NONE', 'LOW', 'MEDIUM', 'HIGH']
+    Description: Strength for prompt-attack (jailbreak/injection) detection on input.
+
+  GuardrailPiiAction:
+    Type: String
+    Default: 'ANONYMIZE'
+    AllowedValues: ['ANONYMIZE', 'BLOCK']
+    Description: Action for PII detected in model output (ANONYMIZE = redact/mask).
+
+  GuardrailThrottleAlarmThreshold:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: >
+      Alert-only. Notifies when ApplyGuardrail (the input screen) throttles more than this
+      many times in 5 minutes — a sign the account is approaching the ApplyGuardrail
+      service quota. Never blocks a call. A super admin retunes it live from the admin
+      console; the deploy re-seeds this parameter from the live alarm, so a redeploy keeps
+      the console value. Passed to the AgentStack, which owns the alarm.
+
+  GuardrailInterventionAlarmThreshold:
+    Type: Number
+    Default: 25
+    MinValue: 1
+    Description: >
+      Alert-only. Notifies when the input guardrail intervenes (blocks a turn) more than
+      this many times in 5 minutes — a possible abuse spike. Higher default than the
+      throttle alarm because a few interventions are normal. Never blocks a call.
+      Console-retunable and re-seeded on redeploy like the throttle threshold.
+
+  EnableWebSearch:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Give the research agent managed AgentCore Web Search (an AWS-operated web
+      index; queries stay inside AWS via the managed connector). ON by default.
+      Adds a per-query charge (see Indicative costs in the README). Available in
+      us-east-1, eu-west-1 and ap-northeast-1; skipped in any other Region. Set to 'false' to run
+      without it — the research agent then returns an explicit "unverified"
+      instead of citing live sources.
+
+
+  TemplateBaseUrl:
+    Type: String
+    Description: S3 URL where nested templates are hosted
+    Default: ''
+
+  ArtifactsBucket:
+    Type: String
+    Default: ''
+    Description: >
+      S3 bucket holding the staged deploy artifacts (nested templates and Lambda
+      code). Kept separate from TemplateBaseUrl on purpose: CloudFormation needs a
+      resolvable *URL* for a nested stack's TemplateURL but a bare bucket *name*
+      for a Lambda's Code.S3Bucket, and neither can be derived from the other
+      without string surgery.
+  ArtifactsVersion:
+    Type: String
+    Default: ''
+    Description: >
+      Content hash of the staged Lambda artifacts, produced by
+      deployment/build-s3-dist.sh and threaded into the Lambda/layer S3 keys.
+      CloudFormation ignores a same-key S3 overwrite, so without a changing key a
+      redeploy would silently not roll the Lambda code. A content hash (rather than
+      a build label) means no-op redeploys do not churn. Leave empty to use the
+      unversioned keys that backend/scripts/build-tier1.sh uploads.
+
+  WebAppUrl:
+    Type: String
+    Default: ''
+    Description: >
+      Override for VITE_WEBAPP_URL in the admin console. Leave blank to let
+      the deployer default it to the FrontendStack CloudFront URL.
+
+  InitialAdminEmail:
+    Type: String
+    Default: ''
+    Description: >
+      Email address for the initial admin user. A Cognito user is created
+      on stack Create with this email and added to the admins group.
+      Cognito sends a welcome email with a temporary password.
+    AllowedPattern: '^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|)$'
+
+  InitialAdminName:
+    Type: String
+    Default: ''
+    Description: >
+      Display name for the initial admin user (optional). Used to greet them
+      by name in the app.
+
+  EmailSenderAddress:
+    Type: String
+    Default: ''
+    AllowedPattern: '^([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|)$'
+    Description: >
+      Verified SES address to send user invitations from. Optional: the initial
+      admin above and `make cognito-user` both work without it. Inviting further
+      users from the admin console does need it, and the address must already be a
+      verified SES identity in this account and region. Leave blank to configure it
+      in the admin console after deployment.
+
+  EmailSenderName:
+    Type: String
+    Default: ''
+    Description: >
+      Display name for invitation emails, e.g. "DB Ops Agent". Only used when
+      EmailSenderAddress is set.
+
+  AppName:
+    Type: String
+    Default: 'DBOps Agent (Beta)'
+    Description: >
+      Product display name (invite email + apps). Set by the distribution
+      dashboard at deploy; intentionally omitted from the parameter groups so
+      it isn't surfaced as a customer-editable field.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: >
+      Retention period (in days) for access logs — VPC flow logs, API Gateway
+      access logs, and the central log-archive S3 bucket. Logs stay in this
+      (the customer's) account.
+
+  RefreshTokenValidityDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 3650
+    Description: >
+      How long a Cognito refresh token stays valid, in days, before the user must
+      sign in again. Shorter bounds how long a stolen refresh token can be used;
+      logout and a privilege change revoke it immediately regardless. Access and id
+      tokens are fixed at 60 minutes. Passed to CognitoStack.
+
+  ApiThrottleRateLimit:
+    Type: Number
+    Default: 100
+    Description: >
+      Steady-state request/second ceiling for the whole REST API. Sheds a flood
+      or runaway loop while staying well above normal use. Raise for larger fleets.
+
+  ApiThrottleBurstLimit:
+    Type: Number
+    Default: 200
+    Description: >
+      Short-spike allowance for the REST API throttle (absorbs page loads that
+      fan out into several calls at once).
+
+  BudgetLimitAmount:
+    Type: Number
+    Default: 100
+    MinValue: 1
+    Description: >
+      Monthly cost budget in USD. Alert-only — emails NotificationEmail (when set) at
+      80% and 100% of this amount; it never blocks anything. A super admin can change
+      it later in the admin console, and a redeploy keeps that value (deployment reads
+      the live budget and seeds this parameter from it).
+
+  JwtSignatureVerification:
+    Type: String
+    Default: 'enforce'
+    AllowedValues: ['off', 'log', 'enforce']
+    Description: >
+      In-app JWT signature verification, applied by both the API and the
+      /invocations runtime. 'enforce' (default) re-verifies each bearer against the
+      Cognito JWKS (signature, issuer, expiry, app-client binding) and rejects a genuine
+      failure; 'log' verifies and logs only; 'off' disables it. Enforce is safe because
+      the API Gateway and AgentCore Cognito authorizers already verify every sanctioned
+      request at the edge, so this only rejects a token that reached the backend without
+      the edge. It fails OPEN on a JWKS/dependency outage so a key-endpoint blip cannot
+      become an auth outage. Leave at 'enforce' unless debugging.
+  DbPortRange:
+    Type: String
+    Default: '5432-5432'
+    AllowedPattern: '^\d{1,5}-\d{1,5}$'
+    Description: >
+      PostgreSQL port range (from-to) the Tier 2 deep scan may reach on monitored
+      databases. The scan task's security group allows egress to 5432 always (the
+      default PostgreSQL port) and to this range when it differs. Widen it (e.g. 5432-5440)
+      when a database listens on another port.
+  SameRegionConnectivity:
+    Type: String
+    Default: 'peering-first'
+    AllowedValues: ['peering-first', 'lattice']
+    Description: >
+      How the agent reaches a same-region database. 'peering-first' (default) peers the
+      database VPC and falls back to a VPC Lattice resource endpoint only when that VPC's
+      address range is already routed to another peered VPC. 'lattice' uses a resource
+      endpoint for every same-region database so no route is ever added to a database
+      VPC; it adds a small hourly charge per database (see Indicative costs in the
+      README). Cross-region databases always peer.
+  AuditVault:
+    Type: String
+    Default: 'on'
+    AllowedValues: ['on', 'off']
+    Description: >
+      Initial state of the admin audit vault switch. While it is on, every privileged
+      admin-console action is written once to an S3 bucket with Object Lock
+      (COMPLIANCE): nobody, not even the account root user, can change or delete a
+      record before its retention ends. A super admin can switch it in Settings > Audit;
+      a redeploy keeps the console value. Trials and test stacks: set 'off' so teardown
+      leaves an empty bucket that is deleted.
+  AuditRetentionDays:
+    Type: Number
+    Default: 365
+    MinValue: 1
+    MaxValue: 3653
+    Description: >
+      Minimum days each admin audit record is locked against deletion or change
+      (S3 Object Lock, COMPLIANCE). A super admin can raise the retention of new
+      records in the console, never below this value. Changing it affects new records
+      only; an existing record's lock is never shortened.
+  VpcCidr:
+    Type: String
+    Default: '172.20.0.0/16'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-4])$'
+    Description: >
+      CIDR block for the VPC this solution creates. The default suits almost every
+      account. Change it only if it would overlap a VPC you intend to peer with, because
+      peering rejects overlapping ranges. If you change it, change the four subnet CIDRs
+      below to match, since a subnet outside the VPC range is rejected outright.
+  PublicSubnet1Cidr:
+    Type: String
+    Default: '172.20.1.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: Public subnet in the first AZ. Must be inside VpcCidr.
+  PublicSubnet2Cidr:
+    Type: String
+    Default: '172.20.2.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: Public subnet in the second AZ. Must be inside VpcCidr.
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: '172.20.10.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: >
+      Private subnet in the first AZ. The API and the agent runtime live here.
+      Must be inside VpcCidr.
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: '172.20.20.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: >
+      Private subnet in the second AZ. The API and the agent runtime live here.
+      Must be inside VpcCidr.
+
+Conditions:
+  UseDefaultWebAppUrl: !Equals [!Ref WebAppUrl, '']
+  CloudTrailEnabled: !Equals [!Ref EnableCloudTrail, 'true']
+  # Gates the fail-closed guardrail switch. GuardrailEnforce must only be turned on when
+  # a guardrail actually exists: guardrail.yaml emits EMPTY GuardrailId/GuardrailVersion
+  # when EnableGuardrail is false, and the application refuses the model call when
+  # enforcement is on but the ids are unresolvable. Passing enforcement unconditionally
+  # would therefore make EnableGuardrail=false break every model call instead of running
+  # without a guardrail, which is the documented fail-soft behaviour of that setting.
+  GuardrailEnabled: !Equals [!Ref EnableGuardrail, 'true']
+  # A cost budget with no email subscriber is still valid (it tracks and is visible in
+  # the console / editable from the app); alerts are only attached when an email exists.
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Resources:
+  # ════════════════════════════════════════════════════════════════════════════
+  # Layer 1: Foundation (no dependencies)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/vpc.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        LogRetentionDays: !Ref LogRetentionDays
+        VpcCidr: !Ref VpcCidr
+        PublicSubnet1Cidr: !Ref PublicSubnet1Cidr
+        PublicSubnet2Cidr: !Ref PublicSubnet2Cidr
+        PrivateSubnet1Cidr: !Ref PrivateSubnet1Cidr
+        PrivateSubnet2Cidr: !Ref PrivateSubnet2Cidr
+        DbPortRange: !Ref DbPortRange
+      TimeoutInMinutes: 15
+
+  CognitoStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/cognito.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        EnableCognitoThreatProtection: !Ref EnableCognitoThreatProtection
+        RefreshTokenValidityDays: !Ref RefreshTokenValidityDays
+        InitialAdminEmail: !Ref InitialAdminEmail
+        InitialAdminName: !Ref InitialAdminName
+        AppName: !Ref AppName
+        # Register both CloudFront URLs as OAuth callback/logout URLs. Neither SPA stack
+        # references Cognito, so consuming their outputs here creates no cycle - it just
+        # orders CognitoStack after them. Doing it declaratively avoids a post-deploy
+        # `update-user-pool-client` call, which REPLACES rather than merges the client
+        # config and so silently drops AllowedOAuthFlows/Scopes if they are not re-sent.
+        FrontendUrl: !GetAtt FrontendStack.Outputs.FrontendUrl
+        AdminUrl: !GetAtt AdminConsoleStack.Outputs.AdminUrl
+      TimeoutInMinutes: 10
+
+  StorageStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/storage.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        NotificationEmail: !Ref NotificationEmail
+        LogRetentionDays: !Ref LogRetentionDays
+        EmailSenderAddress: !Ref EmailSenderAddress
+        EmailSenderName: !Ref EmailSenderName
+        AuditVault: !Ref AuditVault
+        AuditRetentionDays: !Ref AuditRetentionDays
+      TimeoutInMinutes: 10
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Layer 2: Data store
+  # ════════════════════════════════════════════════════════════════════════════
+  # The metrics store is two DynamoDB tables in StorageStack (Tier1MetricsTable,
+  # Tier2ScansTable) plus CloudWatch custom metrics published by the collectors. No
+  # database cluster, no VPC placement, no schema to initialise.
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Layer 3: Static frontends (no dependencies)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  FrontendStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/frontend.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        EnableWAF: !Ref EnableWAF
+        WebAclArn: !Ref FrontendWebAclArn
+      TimeoutInMinutes: 15
+
+  AdminConsoleStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/admin-console.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        EnableWAF: !Ref EnableWAF
+        WebAclArn: !Ref AdminWebAclArn
+      TimeoutInMinutes: 15
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Layer 4: Agent Runtime + Batch (depends on VPC, Cognito, Storage)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  AgentStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - VPCStack
+      - CognitoStack
+      - StorageStack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/agent.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        ContainerImageUri: !Ref BackendImageUri
+        BatchImageUri: !Ref BatchImageUri
+        UserPoolId: !GetAtt CognitoStack.Outputs.UserPoolId
+        WebClientId: !GetAtt CognitoStack.Outputs.WebClientId
+        M2MClientId: !GetAtt CognitoStack.Outputs.M2MClientId
+        CognitoDomain: !GetAtt CognitoStack.Outputs.CognitoDomain
+        ReportsS3Bucket: !GetAtt StorageStack.Outputs.ReportsBucketName
+        # Four IAM roles in this stack scope a DynamoDB grant to this table name, and three
+        # compute resources receive it as DB_CONFIG_TABLE. The child declares it with
+        # Default: '', so omitting it here produced grants on 'table/' - an ARN that matches
+        # nothing. The application still resolved the right table, because resource_names
+        # treats an empty override as unset, so the mismatch surfaced only as AccessDenied
+        # on dbops-instances from the agent, Tier 1 collection and the Batch scan.
+        DbConfigTable: !Sub '${ResourcePrefix}-instances'
+        AgentModelId: !Ref AgentModelId
+        NotificationTopicArn: !GetAtt StorageStack.Outputs.NotificationTopicArn
+        AlarmEmailRecipient: !Ref NotificationEmail
+        OperatorAppUrl: !GetAtt FrontendStack.Outputs.FrontendUrl
+        # The Tier 1 collector repairs cross-Region /32 host routes on the agent private
+        # route table and records failovers and repairs in the audit vault (the same
+        # three Audit* values the API stack gets).
+        PrivateRouteTableId: !GetAtt VPCStack.Outputs.PrivateRouteTableId
+        AgentVpcId: !GetAtt VPCStack.Outputs.VpcId
+        # The runtime's stream redactor masks addresses inside the deployment's VPC.
+        AgentVpcCidr: !Ref VpcCidr
+        AuditBucketName: !GetAtt StorageStack.Outputs.AuditBucketName
+        AuditVault: !Ref AuditVault
+        AuditRetentionDays: !Ref AuditRetentionDays
+        SubnetIds: !GetAtt VPCStack.Outputs.PrivateSubnetIds
+        SecurityGroupIds: !GetAtt VPCStack.Outputs.PrivateSecurityGroupId
+        # Dedicated egress-scoped group for the Tier 2 scan task.
+        ScanSecurityGroupId: !GetAtt VPCStack.Outputs.ScanSecurityGroupId
+        # The metrics store: the collectors write these two tables and publish to
+        # CloudWatch; the runtime reads them.
+        Tier1MetricsTable: !GetAtt StorageStack.Outputs.Tier1MetricsTableName
+        Tier2ScansTable: !GetAtt StorageStack.Outputs.Tier2ScansTableName
+        Tier1RetentionDays: !Ref Tier1RetentionDays
+        LambdaCodeBucket: !Ref ArtifactsBucket
+        ArtifactsVersion: !Ref ArtifactsVersion
+        EnableWebSearch: !Ref EnableWebSearch
+        # This stack owns the AgentCore runtime that serves /invocations — chat and all
+        # four sub-agents. Those are the model calls that carry untrusted content, so the
+        # guardrail has to reach here, not only the API stack. The GetAtt references make
+        # CloudFormation order GuardrailStack before this stack; no DependsOn needed.
+        #
+        # Two identities, one per direction: GuardrailId is attached to the model and
+        # screens responses, InputGuardrailId screens a single user turn on its way in.
+        GuardrailId: !GetAtt GuardrailStack.Outputs.ModelGuardrailId
+        GuardrailVersion: !GetAtt GuardrailStack.Outputs.ModelGuardrailVersion
+        InputGuardrailId: !GetAtt GuardrailStack.Outputs.InputGuardrailId
+        InputGuardrailVersion: !GetAtt GuardrailStack.Outputs.InputGuardrailVersion
+        GuardrailEnforce: !If [GuardrailEnabled, 'on', 'false']
+        # In-app JWT enforcement for the /invocations runtime.
+        JwtSignatureVerification: !Ref JwtSignatureVerification
+        # Alert-only alarm thresholds. The AgentStack owns the two guardrail alarms; these
+        # are retunable live from the console and re-seeded from the live alarm on redeploy.
+        GuardrailThrottleAlarmThreshold: !Ref GuardrailThrottleAlarmThreshold
+        GuardrailInterventionAlarmThreshold: !Ref GuardrailInterventionAlarmThreshold
+      TimeoutInMinutes: 30
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Bedrock Guardrails (independent). Emits two identities, threaded into BOTH the API
+  # stack and the agent stack: the model guardrail, attached to every model call built
+  # through model_resolver and screening responses, and the input guardrail, applied to
+  # one user turn before it reaches the agent. Fail-soft: disabled => empty outputs =>
+  # no guardrail, and GuardrailEnforce is passed as 'false' so nothing refuses.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  GuardrailStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/guardrail.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        EnableGuardrail: !Ref EnableGuardrail
+        GuardrailContentStrength: !Ref GuardrailContentStrength
+        GuardrailPromptAttackStrength: !Ref GuardrailPromptAttackStrength
+        GuardrailPiiAction: !Ref GuardrailPiiAction
+      TimeoutInMinutes: 10
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Layer 5: REST API (depends on everything above)
+  # ════════════════════════════════════════════════════════════════════════════
+
+  APIStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - AgentStack
+      - GuardrailStack
+      - FrontendStack
+      - AdminConsoleStack
+    Properties:
+      TemplateURL: !Sub '${TemplateBaseUrl}/api.yaml'
+      Parameters:
+        ResourcePrefix: !Ref ResourcePrefix
+        ContainerImageUri: !Ref BackendImageUri
+        GuardrailId: !GetAtt GuardrailStack.Outputs.ModelGuardrailId
+        GuardrailVersion: !GetAtt GuardrailStack.Outputs.ModelGuardrailVersion
+        InputGuardrailId: !GetAtt GuardrailStack.Outputs.InputGuardrailId
+        InputGuardrailVersion: !GetAtt GuardrailStack.Outputs.InputGuardrailVersion
+        # Passed explicitly and gated, because api.yaml defaults it to 'on': left to that
+        # default, a deployment with EnableGuardrail=false would combine enforcement ON
+        # with the empty ids the guardrail stack emits when disabled, and the application
+        # refuses every model call it cannot resolve a guardrail for. Gating keeps 'false'
+        # meaning "no guardrail" rather than "no model calls".
+        GuardrailEnforce: !If [GuardrailEnabled, 'on', 'false']
+        # In-app JWT enforcement for the API. api.yaml defaults this to 'enforce';
+        # passed explicitly so the whole-solution knob in this template is the source of truth.
+        JwtSignatureVerification: !Ref JwtSignatureVerification
+        SameRegionConnectivity: !Ref SameRegionConnectivity
+        # Configure warns when a database's port is outside the deep scan's range.
+        DbPortRange: !Ref DbPortRange
+        # The admin audit vault. The API task writes and reads it. The agent stack
+        # gets these three only for the Tier 1 collector, which writes system admin
+        # events (cluster failover, host-route repair) put-only; the agent runtime gets
+        # none of them: its query_plan events are index-only.
+        AuditBucketName: !GetAtt StorageStack.Outputs.AuditBucketName
+        AuditVault: !Ref AuditVault
+        AuditRetentionDays: !Ref AuditRetentionDays
+        VpcId: !GetAtt VPCStack.Outputs.VpcId
+        SubnetIds: !GetAtt VPCStack.Outputs.PrivateSubnetIds
+        # No SecurityGroupIds here: api.yaml dropped that parameter when the VPC
+        # Link moved to its own security group. PrivateSecurityGroupId below still
+        # carries the shared private group for the ECS task.
+        UserPoolId: !GetAtt CognitoStack.Outputs.UserPoolId
+        WebClientId: !GetAtt CognitoStack.Outputs.WebClientId
+        M2MClientId: !GetAtt CognitoStack.Outputs.M2MClientId
+        # CORS lockdown: the only browser origins allowed to call the
+        # API are this deployment's frontend + admin-console CloudFront URLs, plus the
+        # custom WebAppUrl when one is configured.
+        AllowedCorsOrigins: !Join
+          - ','
+          - !If
+            - UseDefaultWebAppUrl
+            - - !GetAtt FrontendStack.Outputs.FrontendUrl
+              - !GetAtt AdminConsoleStack.Outputs.AdminUrl
+            - - !GetAtt FrontendStack.Outputs.FrontendUrl
+              - !GetAtt AdminConsoleStack.Outputs.AdminUrl
+              - !Ref WebAppUrl
+        ReportsS3Bucket: !GetAtt StorageStack.Outputs.ReportsBucketName
+        DbConfigTable: !Sub '${ResourcePrefix}-instances'
+        AgentModelId: !Ref AgentModelId
+        NotificationTopicArn: !GetAtt StorageStack.Outputs.NotificationTopicArn
+        AlarmEmailRecipient: !Ref NotificationEmail
+        BatchJobQueue: !GetAtt AgentStack.Outputs.BatchJobQueueArn
+        BatchJobDefinition: !GetAtt AgentStack.Outputs.BatchJobDefinitionArn
+        ScanTriggerLambdaArn: !GetAtt AgentStack.Outputs.ScanTriggerFunctionArn
+        SchedulerRoleArn: !GetAtt AgentStack.Outputs.SchedulerRoleArn
+        ScanSchedulerDlqArn: !GetAtt AgentStack.Outputs.ScanTriggerDLQArn
+        Tier1CollectorLambdaArn: !GetAtt AgentStack.Outputs.Tier1CollectorFunctionArn
+        Tier1SchedulerRoleArn: !GetAtt AgentStack.Outputs.Tier1SchedulerRoleArn
+        AgentVpcId: !GetAtt VPCStack.Outputs.VpcId
+        AgentVpcCidr: !Ref VpcCidr
+        PrivateRouteTableId: !GetAtt VPCStack.Outputs.PrivateRouteTableId
+        PrivateSecurityGroupId: !GetAtt VPCStack.Outputs.PrivateSecurityGroupId
+        Tier1MetricsTable: !GetAtt StorageStack.Outputs.Tier1MetricsTableName
+        Tier2ScansTable: !GetAtt StorageStack.Outputs.Tier2ScansTableName
+        ArtifactsVersion: !Ref ArtifactsVersion
+        LogRetentionDays: !Ref LogRetentionDays
+        ApiThrottleRateLimit: !Ref ApiThrottleRateLimit
+        ApiThrottleBurstLimit: !Ref ApiThrottleBurstLimit
+        EnableWAF: !Ref EnableWAF
+        EnableCloudTrail: !Ref EnableCloudTrail
+        MemoryId: !GetAtt AgentStack.Outputs.MemoryId
+        # The admin console's Security page names THIS stack as the one to update
+        # (a nested stack only knows its generated child name).
+        RootStackName: !Ref AWS::StackName
+      TimeoutInMinutes: 30
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Optional: deployment-scoped CloudTrail (EnableCloudTrail=true)
+  # Account/region-level management-event trail with log-file validation,
+  # written to a dedicated private, encrypted, lifecycle-bounded bucket in the
+  # customer's account. Default OFF — most enterprises already run an
+  # organization trail that covers this account.
+  # ════════════════════════════════════════════════════════════════════════════
+
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Condition: CloudTrailEnabled
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-cloudtrail-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireTrailLogs
+            Status: Enabled
+            ExpirationInDays: !Ref LogRetentionDays
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CloudTrailEnabled
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+                # Confused-deputy protection: only this account's CloudTrail may
+                # write here. Without it, any account's CloudTrail service could
+                # deliver objects into this bucket.
+                aws:SourceAccount: !Ref 'AWS::AccountId'
+          # Deny anything that did not arrive over TLS (AwsSolutions-S10). This
+          # bucket holds the audit trail, so it matters most here.
+          #
+          # Bool takes exactly one key. A second, non-boolean condition makes the
+          # Deny unsatisfiable and silently turns it into dead code, which
+          # cfn-lint will not flag. test_threat_model_guards.py asserts the shape.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt CloudTrailBucket.Arn
+              - !Sub '${CloudTrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  DeploymentTrail:
+    Type: AWS::CloudTrail::Trail
+    Condition: CloudTrailEnabled
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub '${ResourcePrefix}-${AWS::StackName}'
+      S3BucketName: !Ref CloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Cost guardrail — alert-only monthly budget (never blocks)
+  # ════════════════════════════════════════════════════════════════════════════
+  # A single account-wide COST budget seeded from BudgetLimitAmount. It emails
+  # NotificationEmail at 80% and 100% of the limit; it does not stop any workload.
+  # A super admin edits the amount from the admin console (budgets:ModifyBudget on the
+  # API task role); the deploy tooling reads the live amount and seeds the parameter on
+  # the next deploy, so a redeploy converges to the edited value rather than resetting.
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: !Sub '${ResourcePrefix}-monthly-cost-${AWS::Region}'
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref BudgetLimitAmount
+          Unit: USD
+      NotificationsWithSubscribers: !If
+        - HasNotificationEmail
+        - - Notification:
+              NotificationType: ACTUAL
+              ComparisonOperator: GREATER_THAN
+              Threshold: 80
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: EMAIL
+                Address: !Ref NotificationEmail
+          - Notification:
+              NotificationType: ACTUAL
+              ComparisonOperator: GREATER_THAN
+              Threshold: 100
+              ThresholdType: PERCENTAGE
+            Subscribers:
+              - SubscriptionType: EMAIL
+                Address: !Ref NotificationEmail
+        - !Ref 'AWS::NoValue'
+
+Outputs:
+  # Every principal in this account that assumes the customer-installed discovery role.
+  # The member-account role's trust policy (rendered by the admin console) trusts this
+  # account and narrows that to IAM roles only via its aws:PrincipalArn condition. To
+  # tighten it to exactly these principals, replace the roles-only pattern in that
+  # condition with this value (or a pattern covering it). These roles carry
+  # CloudFormation-generated names, so read this output rather than guessing a prefix.
+  AssumeRolePrincipalArns:
+    Description: >-
+      Role ARNs that assume the cross-account discovery role. Use to narrow the
+      aws:PrincipalArn condition in the member-account role's trust policy.
+    Value: !Join
+      - ','
+      - - !GetAtt AgentStack.Outputs.AssumeRolePrincipalArns
+        - !GetAtt APIStack.Outputs.ApiTaskRoleArn
+  ResourcePrefix:
+    Description: >-
+      The prefix every physical resource name derives from. Exposed because
+      deployment/deploy-spas.sh writes it into the admin console's runtime config:
+      the console builds the Secrets Manager name an operator is told to create,
+      and the deployment's IAM policies authorise exactly that prefix, so the two
+      must agree.
+    Value: !Ref ResourcePrefix
+  DashboardUrl:
+    Description: Dashboard URL
+    Value: !GetAtt FrontendStack.Outputs.FrontendUrl
+
+  AdminConsoleUrl:
+    Description: Admin Console URL
+    Value: !GetAtt AdminConsoleStack.Outputs.AdminUrl
+
+  ApiUrl:
+    Description: REST API URL
+    Value: !GetAtt APIStack.Outputs.ApiUrl
+
+  UserPoolId:
+    Description: Cognito User Pool ID (for creating users)
+    Value: !GetAtt CognitoStack.Outputs.UserPoolId
+
+  WebClientId:
+    Description: Cognito Web Client ID
+    Value: !GetAtt CognitoStack.Outputs.WebClientId
+
+  CognitoDomain:
+    Description: Cognito domain
+    Value: !GetAtt CognitoStack.Outputs.CognitoDomain
+
+  AgentRuntimeArn:
+    Description: AgentCore Runtime ARN
+    Value: !GetAtt AgentStack.Outputs.RuntimeArn
+
+  FrontendBucketName:
+    Description: S3 bucket serving the operator app (deploy writes config.js here)
+    Value: !GetAtt FrontendStack.Outputs.FrontendBucketName
+
+  FrontendDistributionId:
+    Description: CloudFront distribution for the operator app (for invalidation)
+    Value: !GetAtt FrontendStack.Outputs.CloudFrontDistributionId
+
+  AdminBucketName:
+    Description: S3 bucket serving the admin console (deploy writes config.js here)
+    Value: !GetAtt AdminConsoleStack.Outputs.AdminBucketName
+
+  AdminDistributionId:
+    Description: CloudFront distribution for the admin console (for invalidation)
+    Value: !GetAtt AdminConsoleStack.Outputs.AdminDistributionId
+  AuditBucketName:
+    Description: >
+      Admin audit vault bucket. Retained by `make destroy` while it holds locked
+      records; read here so teardown can delete it once it is empty.
+    Value: !GetAtt StorageStack.Outputs.AuditBucketName
+
+  ResolvedWebAppUrl:
+    Description: >
+      The operator-app URL the admin console should link to - the WebAppUrl
+      override when set, otherwise the frontend CloudFront URL. Resolved here so
+      the deploy does not have to reimplement the fallback.
+    Value: !If
+      - UseDefaultWebAppUrl
+      - !GetAtt FrontendStack.Outputs.FrontendUrl
+      - !Ref WebAppUrl

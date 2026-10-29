@@ -1,0 +1,39 @@
+Payments
+Payments databases
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+2 databases
+2
+reachable
+metadata refreshed for 2 of 2
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+2 onboarded · 1 found, not onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+4
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Operators
+Operators are the people who can open this space in the operator app and work with its databases. Only users added here can access it.
+Operator app link
+Direct link to the operator web app for this space. Only users assigned below can access it.
+Access control
+Access is managed via Cognito user groups. Assign users below to grant them access to this space's databases in the operator app.
+Users must be explicitly added to access this space.
+User access
+Manage which Cognito users can access this space in the operator app.
+Add user
+USER EMAIL STATUS ACTIONS
+No users assigned to this space. Click "Add user" to grant access.
+Agent capabilities
+Next: Topology

@@ -1,0 +1,12 @@
+Agent Spaces
+Agent Spaces define the boundary of what DBOps Agent (Beta) can access and investigate.
+Create Agent Space
+NAME PRIMARY ACCOUNT REGIONS DATABASES OWNER STATUS
+Payments
+111122223333
+us-east-1
+0 alice@example.com Active
+Old reporting
+111122223333
+us-east-1
+1 alice@example.com Deleting…

@@ -1,0 +1,59 @@
+Payments
+Payments databases
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+0 databases
+metadata refreshed for 0 of 0
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+2
+Databases
+3 found — onboard the ones for this space
+Agent capabilitiesoptional
+Knowledge, skills and model for this space
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Discover & onboard
+Scans each account in its regions for PostgreSQL databases. Onboard the ones this space should include by supplying a read-only user's secret — that is what makes a database part of this space.
+Run discovery again
+4 found · 3 new · 0 proposed to this space
+Scan log
+Found, not yet onboarded (3)
+All Engines
+Aurora PostgreSQL
+RDS PostgreSQL
+All Status
+Not onboarded
+Configuring
+Failed
+Deleting
+Delete failed
+3 databases
+NAME ACCOUNT ENGINE REGION STATUS ACTIONS
+orders-db 111122223333 RDS PostgreSQL us-east-1 New
+Onboard
+↳orders-replica
+replica of orders-db
+111122223333 RDS PostgreSQL us-east-1 New
+Onboard
+billing-cluster 111122223333 Aurora PostgreSQL us-east-1 New
+Onboard
+Not supported (1)
+Databases discovery found that cannot be onboarded
+NAME REGION REASON
+ledger-global us-east-1 Not supported yet: part of an Aurora Global Database
+Onboarded databases (0)
+All 0
+No databases onboarded yet.
+3 found above. Onboard the ones this space should include.
+Accounts & regions
+3 found — onboard the ones for this space
+Next: Agent capabilities

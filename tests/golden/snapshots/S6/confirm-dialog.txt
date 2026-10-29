@@ -1,0 +1,5 @@
+Turn off the audit vault?
+New admin actions will be recorded in the index only, which can be edited by anyone holding the application's write role. Records already in the vault stay locked until they expire. A notification is sent.
+Type turn off audit vault to confirm
+Cancel
+Turn off the vault

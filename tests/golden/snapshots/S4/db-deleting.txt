@@ -1,0 +1,49 @@
+Payments
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+2 databases
+1
+reachable
+metadata refreshed for 1 of 1
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+2 onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+4
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Discover & onboard
+Scans each account in its regions for PostgreSQL databases. Onboard the ones this space should include by supplying a read-only user's secret — that is what makes a database part of this space.
+Run discovery again
+Onboarded databases (2)
+All 2
+Ready 1
+Deleting 1
+Configure monitoring
+2 databases
+NAME ACCOUNT ENGINE REGION ENDPOINT STATUS MONITORING ACTIONS
+orders-db 111122223333 RDS PostgreSQL us-east-1 orders-db.c0ffee00.us-east-1.rds.amazonaws.com Deleting…
+TIER 1 · METRICS
+5 min
+TIER 2 · SCAN
+Daily
+Removing…
+↳orders-replica
+replica of orders-db
+111122223333 RDS PostgreSQL us-east-1 orders-replica.c0ffee00.us-east-1.rds.amazonaws.com Ready
+TIER 1 · METRICS
+5 min
+TIER 2 · SCAN
+Daily
+Accounts & regions
+Next: Agent capabilities

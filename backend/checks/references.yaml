@@ -1,0 +1,1125 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Diagnostic check references — threshold ranges + AWS signals per check.
+# Not surfaced to end users; customizable (tune here, no code change).
+# The TOOL reads `thresholds`; the skill/agent use observability / prerequisites /
+# complementary. No SQL here — SQL lives in the tool.
+
+vacuum-and-bloat:
+  catalog_id: CHK-007
+  title: Autovacuum Effectiveness & Dead Tuple Health
+  tool: get_vacuum_stats_health
+  metric: Dead tuple %
+  thresholds:
+    kind: size_weighted
+    # bands by total_relation_size (bytes); first match wins (top-down)
+    size_bands:
+      - { name: very_large, min_bytes: 53687091200 }                         # >= 50 GB (community heuristic, not AWS)
+      - { name: large,      min_bytes: 1073741824, max_bytes: 53687091200 }  # 1–50 GB
+      - { name: small,      max_bytes: 1073741824 }                          # < 1 GB
+    # dead_pct thresholds per band; value strictly greater => that severity
+    levels:
+      notice:   { small: 10, large: 5,  very_large: 2 }
+      warning:  { small: 20, large: 10, very_large: 5 }
+      critical: { small: 50, large: 20, very_large: 10 }
+    hard_criticals: [ autovacuum_disabled ]
+    notes: >
+      Size-weighted by total_relation_size. Larger tables escalate at a lower %.
+      Rank remediation by estimated wasted bytes. autovacuum_enabled=false is
+      CRITICAL regardless of %.
+  complementary:
+    - { tells: "Tables with autovacuum disabled",                            via: get_vacuum_stats_health }
+    - { tells: "Tables with > 1M dead tuples",                               via: get_vacuum_stats_health }
+    - { tells: "Global autovacuum config (workers, cost_delay, scale_factor)", via: get_db_configuration }
+    - { tells: "PG 13+ insert-triggered autovacuum lag",                     via: get_insert_autovacuum_lag }
+    - { tells: "Long transactions / held snapshots blocking vacuum",         via: get_current_activity }
+  observability:
+    - { service: CloudWatch Metrics, signal: "ReadLatency / ReadIOPS", healthy: "< 5ms", warning: "> 10ms sustained", critical: "> 20ms sustained", prerequisite: "always available" }
+    - { service: CloudWatch Logs, signal: "autovacuum completion messages", prerequisite: "log_autovacuum_min_duration set + log export to CloudWatch", no_match: "INCONCLUSIVE unless prerequisite confirmed" }
+    - { service: Performance Insights, signal: "IO:DataFileRead", prerequisite: "Performance Insights enabled", no_match: "not observable unless PI enabled" }
+  prerequisites:
+    - { setting: log_autovacuum_min_duration, where: Parameter Group, expected: "0 (log all autovacuum runs)", why: "autovacuum log lines are absent otherwise; a no-match is INCONCLUSIVE, not healthy" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+xid-wraparound-database:
+  catalog_id: CHK-001
+  title: Database transaction-ID age vs the 2-billion wraparound budget
+  tool: get_maintenance_status
+  metric: age(datfrozenxid) per database
+  thresholds:
+    kind: xid_relative
+    # relative tiers = multiples of the instance's autovacuum_freeze_max_age (fetched at run time)
+    relative: { watch: 0.8, notice: 1.0, warning: 1.5 }
+    # absolute transaction-count floors (safety net; 2B hard limit, read-only shutdown ~2.146B)
+    absolute: { warning: 1000000000, critical: 1500000000, emergency: 1800000000 }
+    notes: >
+      Severity is the higher of the relative tier and the absolute floor. Self-managed has no adaptive
+      autovacuum, so the relative WATCH/NOTICE tiers are the earliest signal there.
+  complementary:
+    - { tells: "Oldest transaction pinning XID progress (long-running / idle-in-txn)", via: get_current_activity }
+    - { tells: "Which tables drive the database age",                                  via: get_maintenance_status }
+    - { tells: "Freeze config + adaptive autovacuum posture (per engine)",             via: get_db_configuration }
+    - { tells: "MaximumUsedTransactionIDs trend / burn rate",                          via: get_historical_metrics }
+  observability:
+    - { service: CloudWatch Metrics, signal: MaximumUsedTransactionIDs, healthy: "< 500M", warning: ">= 1B", critical: ">= 1.5B", prerequisite: "always available", alert_window: "Last 1 hour", investigation_lookback: "30 days (Period=5min)" }
+    - { service: CloudWatch Logs, signal: "autovacuum .* to prevent wraparound", prerequisite: "log export + log_autovacuum_min_duration set", no_match: "INCONCLUSIVE unless prerequisite confirmed", investigation_lookback: "7 days" }
+    - { service: CloudWatch Logs, signal: "WARNING .* must be vacuumed within", critical: "any match = imminent read-only shutdown", prerequisite: "log export (WARNING logged by default)", no_match: "INCONCLUSIVE unless prerequisite confirmed", investigation_lookback: "30 days" }
+    - { service: CloudTrail, signal: "ModifyDBParameterGroup (autovacuum params weakened/disabled)", prerequisite: "management events (default)", investigation_lookback: "30 days" }
+  prerequisites:
+    - { setting: log_autovacuum_min_duration, where: Parameter Group, expected: "0 (log all) or 1000", why: "autovacuum log lines are absent otherwise; a no-match is INCONCLUSIVE, not healthy" }
+    - { setting: PostgreSQL log export to CloudWatch, where: "RDS Console > Modify > Log exports", expected: "postgresql enabled", why: "CW Logs wraparound signals are unavailable otherwise" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+xid-wraparound-table:
+  catalog_id: CHK-002
+  title: Per-table relfrozenxid age vs autovacuum_freeze_max_age
+  tool: get_maintenance_status
+  metric: age(relfrozenxid) per table (freeze_pct = xid_age / autovacuum_freeze_max_age)
+  thresholds:
+    kind: xid_relative
+    # freeze_pct 80% == 0.8x, 100% == 1.0x, 150% == 1.5x — the same model as db-level
+    relative: { watch: 0.8, notice: 1.0, warning: 1.5 }
+    absolute: { warning: 1000000000, critical: 1500000000, emergency: 1800000000 }
+    notes: >
+      Localizes CHK-001 to the table(s) driving the database age. Relations with relfrozenxid = 0
+      (partitioned parents) are excluded by the tool, not scored here.
+  complementary:
+    - { tells: "Held snapshot / long-running txn blocking freeze on the aging table", via: get_current_activity }
+    - { tells: "Is the table's autovacuum disabled or starved",                       via: get_vacuum_stats_health }
+    - { tells: "Freeze config + adaptive autovacuum posture (per engine)",            via: get_db_configuration }
+  observability:
+    - { service: CloudWatch Metrics, signal: MaximumUsedTransactionIDs, healthy: "< 500M", warning: ">= 1B", critical: ">= 1.5B", prerequisite: "always available", alert_window: "Last 1 hour", investigation_lookback: "30 days (Period=5min)" }
+  prerequisites:
+    - { setting: log_autovacuum_min_duration, where: Parameter Group, expected: "0 (log all) or 1000", why: "autovacuum completion lines are absent otherwise; a no-match is INCONCLUSIVE" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+invalid-indexes:
+  catalog_id: CHK-003
+  title: Invalid or not-ready indexes (silent write/storage cost, ignored by the planner)
+  tool: get_maintenance_status
+  metric: count of indexes with NOT indisvalid OR NOT indisready
+  thresholds:
+    kind: rows_returned
+    zero_rows: OK
+    any_rows: WARNING
+    escalate_when: >
+      CRITICAL when multiple invalid indexes exist, or an invalid index sits on a large /
+      high-write table (skill judgment — the check lists names, not sizes).
+  complementary:
+    - { tells: "Is the index being rebuilt right now vs. abandoned", via: get_current_activity }
+    - { tells: "Table size/usage to weigh CRITICAL escalation",      via: get_storage_analysis }
+  observability:
+    - { service: CloudTrail, signal: "deployment / failover events that can leave invalid indexes", prerequisite: "management events (default)", investigation_lookback: "90 days (CloudTrail max retention)" }
+    - { service: Performance Insights, signal: "CREATE INDEX CONCURRENTLY activity", prerequisite: "Performance Insights enabled", no_match: "not observable unless PI enabled" }
+  prerequisites:
+    - { setting: PostgreSQL log export to CloudWatch, where: "RDS Console > Modify > Log exports", expected: "postgresql enabled", why: "failed CREATE INDEX CONCURRENTLY messages are unavailable otherwise" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+sequence-exhaustion:
+  catalog_id: CHK-004
+  title: Sequences approaching their maximum value (INSERT-failure risk)
+  tool: get_sequence_exhaustion
+  metric: usage_pct (last_value / max_value; last_value / min_value for descending sequences)
+  thresholds:
+    kind: percent
+    # first band where usage_pct > min wins (evaluated top-down, highest severity first)
+    bands:
+      - { name: emergency, min: 99 }
+      - { name: critical,  min: 90 }
+      - { name: warning,   min: 75 }
+      - { name: notice,    min: 50 }
+    notes: >
+      int2 (max 32K) and int4 (max ~2.1B) sequences on high-write tables are the real risk; int8 is
+      effectively unbounded. A CYCLE'd sequence wraps instead of failing (gaps, not exhaustion).
+  complementary:
+    - { tells: "The owning table/column (blast radius if it exhausts)", via: get_sequence_exhaustion }
+  observability:
+    - { service: CloudWatch Logs, signal: "nextval: reached maximum value of sequence", prerequisite: "PostgreSQL log export", no_match: "INCONCLUSIVE unless log export confirmed", investigation_lookback: "30 days" }
+  prerequisites:
+    - { setting: PostgreSQL log export to CloudWatch, where: "RDS Console > Modify > Log exports", expected: "postgresql enabled", why: "the sequence-exhaustion ERROR is otherwise not visible in CloudWatch" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+unvalidated-constraints:
+  catalog_id: CHK-005
+  title: Constraints added NOT VALID and never validated (integrity not guaranteed for existing rows)
+  tool: get_constraint_validation
+  metric: count of constraints with NOT convalidated
+  thresholds:
+    kind: rows_returned
+    zero_rows: OK
+    any_rows: WARNING
+    escalate_when: >
+      CRITICAL for an unvalidated FK on a high-traffic / business-critical table (skill judgment).
+  complementary:
+    - { tells: "Whether the constraint is FK vs CHECK (contype) — FK affects planner optimizations", via: get_constraint_validation }
+  observability:
+    - { service: CloudTrail, signal: "schema migration / deployment events (incomplete migrations leave NOT VALID)", prerequisite: "management events (default)", investigation_lookback: "90 days" }
+  prerequisites:
+    - { setting: PostgreSQL log export to CloudWatch, where: "RDS Console > Modify > Log exports", expected: "postgresql enabled", why: "migration statements that add NOT VALID constraints are otherwise not visible" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+materialized-view-freshness:
+  catalog_id: CHK-006
+  title: Materialized views — populated state, planner-stats recency, CONCURRENTLY-refresh capability
+  tool: get_materialized_view_freshness
+  metric: relispopulated / analyze recency / has_unique_index (refresh recency = CW Logs, not SQL)
+  thresholds:
+    kind: state
+    states:
+      unpopulated: CRITICAL       # relispopulated = false -> queries against it error
+      never_analyzed: WARNING     # no planner stats -> poor plans
+      no_unique_index: WARNING    # cannot REFRESH MATERIALIZED VIEW CONCURRENTLY (refresh blocks readers)
+    notes: >
+      ANALYZE recency is a STATS proxy, NOT refresh recency: REFRESH does not update stats and
+      autoanalyze rarely fires on matviews. True refresh cadence comes from the CW Logs
+      "REFRESH MATERIALIZED VIEW" signal and is INCONCLUSIVE without the logging prerequisite.
+  complementary:
+    - { tells: "Is a REFRESH running now (writer-side heap rewrite, spikes WAL/IO)", via: get_current_activity }
+  observability:
+    - { service: CloudWatch Logs, signal: "REFRESH MATERIALIZED VIEW", healthy: "refresh seen on the expected cadence", prerequisite: "PostgreSQL log export + log_statement captures it", no_match: "INCONCLUSIVE unless prerequisite confirmed (ANALYZE recency is only a stats proxy)", investigation_lookback: "30 days" }
+  prerequisites:
+    - { setting: PostgreSQL log export to CloudWatch, where: "RDS Console > Modify > Log exports", expected: "postgresql enabled", why: "REFRESH statements are the only true freshness signal; absent otherwise" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+stale-statistics:
+  catalog_id: CHK-050
+  title: Tables with stale planner statistics (ANALYZE overdue) — bad row estimates, bad plans
+  tool: get_stale_statistics
+  metric: days_since_analyze AND n_mod_since_analyze as % of n_live_tup (severity = the worse of the two)
+  thresholds:
+    kind: percent_multi
+    # severity = highest band across BOTH metrics; a never-analyzed table surfaces as a very large
+    # days_since_analyze (COALESCE to epoch), so it lands in the CRITICAL day band without special-casing.
+    days_bands:
+      - { name: critical, min: 30 }
+      - { name: warning,  min: 14 }
+      - { name: notice,   min: 7 }
+    mod_pct_bands:
+      - { name: critical, min: 50 }
+      - { name: warning,  min: 20 }
+      - { name: notice,   min: 10 }
+    notes: >
+      Only tables > 10 MB. Distinct from vacuum staleness — a table can be vacuumed but not analyzed.
+      autoanalyze usually handles this but falls behind on high-write tables and right after bulk loads.
+  complementary:
+    - { tells: "A recent bulk load / migration driving the modified-row backlog", via: get_historical_metrics }
+  observability:
+    - { service: CloudWatch Metrics, signal: "WriteThroughput spikes preceding stale stats (bulk load)", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+index-usage-efficiency:
+  catalog_id: CHK-008
+  title: Indexes wasting resources — invalid, unused, or large-and-rarely-used (review candidates)
+  tool: get_index_statistics
+  metric: idx_scan + index_size_bytes + validity/constraint flags
+  thresholds:
+    kind: index_usage
+    rarely_used_scans: 50             # idx_scan below this = rarely used
+    unused_critical_bytes: 104857600  # unused index > 100MB => CRITICAL review candidate
+    rarely_warning_bytes: 10485760    # rarely-used index > 10MB => WARNING
+    notes: >
+      PRIMARY KEY / UNIQUE indexes are never review candidates (constraint-enforcing). Invalid =>
+      CRITICAL (REINDEX). idx_scan is per-instance and cumulative since the last stats reset — the
+      skill's trust gate (stats age + writer/replica check) governs before any drop.
+  complementary:
+    - { tells: "Was the stats window long enough to trust idx_scan (stats_reset age)", via: get_db_overview }
+  observability:
+    - { service: CloudWatch Metrics, signal: "WriteIOPS (unused indexes add write amplification)", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+duplicate-indexes:
+  catalog_id: CHK-012
+  title: True duplicate indexes on one table (wasted storage + write amplification)
+  tool: get_duplicate_indexes
+  metric: index pairs identical on columns + opclass + collation + access method + predicate + expression
+  thresholds:
+    kind: rows_returned
+    zero_rows: OK
+    any_rows: WARNING
+    combined_critical_bytes: 104857600   # combined pair size > 100MB => CRITICAL
+    escalate_when: >
+      CRITICAL when the pair's combined size exceeds combined_critical_bytes. Before acting the skill
+      MUST verify the redundant index does NOT back a UNIQUE/EXCLUSION constraint and is not REPLICA IDENTITY.
+  complementary:
+    - { tells: "Does the redundant index back a constraint / REPLICA IDENTITY (do NOT drop if so)", via: get_index_statistics }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+fk-without-index:
+  catalog_id: CHK-016
+  title: Foreign keys with no supporting index on the child table (slow joins / CASCADE, lock contention)
+  tool: get_fk_without_indexes
+  metric: child-table total size (bytes) for each FK lacking a leading-column index
+  thresholds:
+    kind: percent    # single-value bands over table_bytes (reuses the percent-band evaluator)
+    bands:
+      - { name: critical, min: 1073741824 }   # > 1 GB child table
+      - { name: warning,  min: 104857600 }     # > 100 MB
+      - { name: notice,   min: 0 }             # any (small table)
+    notes: >
+      A missing FK index makes JOINs and ON DELETE/UPDATE CASCADE scan the child table and can cause
+      lock contention on the parent. Severity scales with child-table size.
+  complementary:
+    - { tells: "Is CASCADE delete/update actually slow or lock-contending now", via: get_lock_analysis }
+  observability:
+    - { service: CloudWatch Logs, signal: "lock waits from FK enforcement", prerequisite: "log_lock_waits on + log export", no_match: "INCONCLUSIVE unless prerequisite confirmed", investigation_lookback: "7 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+sequential-scan-tables:
+  catalog_id: CHK-018
+  title: Tables read heavily by sequential scans — selective scans suggest a missing index
+  tool: get_sequential_scan_tables
+  metric: avg rows per seq scan vs estimated rows (selective if well below a small %)
+  thresholds:
+    kind: selective_scan
+    min_seq_scan: 1000     # seq_scan must exceed this to be worth an index decision
+    selective_pct: 5       # avg rows/scan < this % of est. rows => SELECTIVE => WARNING candidate
+    notes: >
+      WARNING = selective sequential scans (an index MAY help — confirm the query pattern in
+      pg_stat_statements first). Full-table reads (reporting/ETL/append-only) are NOTICE and often
+      intentional. Sequential-scan volume alone is never CRITICAL — the decision depends on the query.
+  complementary:
+    - { tells: "The actual query shape driving the scans (needed before adding an index)", via: get_query_performance }
+  observability:
+    - { service: CloudWatch Metrics, signal: "ReadIOPS / ReadThroughput from full scans", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites:
+    - { setting: pg_stat_statements, where: "shared_preload_libraries + extension", expected: "installed", why: "confirming the query pattern before recommending an index requires pg_stat_statements; without it the WARNING is a candidate, not a conclusion" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+oversized-datatypes:
+  catalog_id: CHK-014
+  title: Columns using potentially oversized / imprecise data types (advisory review)
+  tool: get_oversized_datatypes
+  metric: count of columns matching an oversized/imprecise-type heuristic (ordered by table size)
+  thresholds:
+    kind: rows_returned
+    zero_rows: OK
+    any_rows: NOTICE
+    escalate_when: >
+      Skill judgment only: worth acting mainly on large tables (>10GB) where an ALTER TYPE (a full
+      table rewrite under ACCESS EXCLUSIVE) is justified; not actionable without data-range verification.
+  complementary: []
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+unused-tables:
+  catalog_id: CHK-015
+  title: Tables with zero recorded reads on this instance (owner-driven lifecycle/archival review)
+  tool: get_unused_tables
+  metric: total table size (bytes) for tables with seq_scan + idx_scan = 0
+  thresholds:
+    kind: percent    # single-value bands over total_bytes; capped at WARNING (never auto-drop)
+    bands:
+      - { name: warning, min: 104857600 }   # > 100MB unused = high review priority
+      - { name: notice,  min: 0 }           # any (smaller) unused table = review candidate
+    notes: >
+      Reads are per-instance — a table unused on the writer may be read by a replica. writes_since_reset
+      distinguishes a dead table from an append-only one. Requires stats_reset > 30 days to trust;
+      decision is owner-driven, never an automated drop (so no CRITICAL tier).
+  complementary:
+    - { tells: "Is the table still WRITTEN (append-only) even if not read here", via: get_unused_tables }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+trigger-inventory:
+  catalog_id: CHK-017
+  title: User trigger inventory — flag per-row triggers firing on all DML (write-path overhead)
+  tool: get_trigger_analysis
+  metric: trigger granularity + event coverage + enabled state
+  thresholds:
+    kind: state
+    states:
+      for_each_row_all_dml: WARNING   # FOR EACH ROW on INSERT+UPDATE+DELETE = per-row overhead on every write
+      disabled: NOTICE                # a disabled trigger is dead weight / a possible surprise
+    notes: >
+      The high-write-table qualification (per-row overhead only bites on hot tables) is a skill
+      judgment; the tool flags the FOR EACH ROW + all-DML shape.
+  complementary:
+    - { tells: "Is write latency actually inflated per row (heavy trigger work)", via: get_query_performance }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+toast-health:
+  catalog_id: CHK-009
+  title: TOAST table health — xid age and dead-tuple estimate (large TOAST is normal, not bloat)
+  tool: get_toast_status
+  metric: toast_xid_age (absolute floors) and toast_dead_pct (worst of the two)
+  thresholds:
+    kind: toast
+    xid:
+      absolute: { notice: 500000000, warning: 1000000000, critical: 1500000000, emergency: 1800000000 }
+    dead_pct_bands:
+      - { name: warning, min: 20 }
+      - { name: notice,  min: 10 }
+    notes: >
+      A large TOAST relation is normal for big text/jsonb/bytea columns and is NOT bloat by itself
+      ("TOAST larger than heap" does not imply bloat). Confirm suspected physical bloat on
+      a large (>10GB) TOAST with pgstattuple before acting. TOAST vacuums independently of its parent.
+  complementary:
+    - { tells: "Is the parent table's autovacuum reaching the TOAST relation", via: get_vacuum_stats_health }
+  observability:
+    - { service: CloudWatch Metrics, signal: "ReadLatency / IO:DataFileRead (TOAST pointer chasing)", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+unpartitioned-large-tables:
+  catalog_id: CHK-010
+  title: Large unpartitioned (REGULAR) tables — partitioning candidates
+  tool: get_partitioning_analysis
+  metric: total table size (bytes); only REGULAR (non-partitioned) tables are candidates
+  thresholds:
+    kind: percent   # single-value bands over total_size bytes (REGULAR tables only)
+    bands:
+      - { name: critical, min: 53687091200 }   # > 50 GB
+      - { name: warning,  min: 21474836480 }   # > 20 GB
+      - { name: notice,   min: 0 }             # 1-20 GB (surfaced only above the 1GB SQL net)
+    notes: >
+      Partitioning is a design change (rewrite / new DDL), so this is a candidate list — evaluate query
+      patterns and growth first. Already-partitioned tables and partitions themselves score OK.
+  complementary:
+    - { tells: "Growth rate — is the table actively growing toward a partitioning threshold", via: get_historical_metrics }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+estimated-table-bloat:
+  catalog_id: CHK-011
+  title: Estimated physical table bloat (no-scan) — pg_repack / VACUUM FULL candidates
+  tool: get_bloat_analysis
+  metric: est_bloat_pct (dead-tuple percent estimate; pgstattuple for the accurate confirm)
+  thresholds:
+    kind: percent
+    bands:
+      - { name: critical, min: 50 }
+      - { name: warning,  min: 30 }
+      - { name: notice,   min: 10 }
+    notes: >
+      Cheap estimate from stats (no table scan). CONFIRM with pgstattuple before remediation. Prefer
+      pg_repack over VACUUM FULL (VACUUM FULL takes an ACCESS EXCLUSIVE lock, needs ~2x disk, and
+      rebuilds indexes). Plain VACUUM frees space for reuse but does not shrink the file.
+  complementary:
+    - { tells: "Exact physical bloat (accurate) when the estimate is high", via: get_bloat_analysis }
+    - { tells: "Is autovacuum keeping dead tuples down (root cause of growing bloat)", via: get_vacuum_stats_health }
+  observability: []
+  prerequisites:
+    - { setting: pgstattuple, where: "extension", expected: "installed (for the accurate confirm)", why: "the estimate flags candidates; exact bloat before pg_repack/VACUUM FULL needs pgstattuple" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+database-sizes:
+  catalog_id: CHK-026
+  title: Database sizes — capacity baseline and growth tracking
+  tool: get_storage_analysis
+  metric: per-database size (bytes); capacity severity is observability-led (FreeStorageSpace)
+  thresholds:
+    kind: informational
+    notes: >
+      The SQL gives per-database sizes as a baseline. Capacity severity is not derivable from SQL
+      alone — it comes from CloudWatch FreeStorageSpace (RDS) and week-over-week growth; the skill
+      leads with observability for "are we running out of space".
+  complementary:
+    - { tells: "Growth rate / week-over-week trend", via: get_historical_metrics }
+    - { tells: "Largest tables driving the size", via: get_storage_analysis }
+  observability:
+    - { service: CloudWatch Metrics, signal: "FreeStorageSpace (RDS; Aurora auto-scales)", healthy: "> 25% of allocated", warning: "10-25% remaining", critical: "< 10% remaining", prerequisite: "always available (RDS)", alert_window: "Last 1 hour", investigation_lookback: "30 days (Period=1hr)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+largest-tables:
+  catalog_id: CHK-027
+  title: Largest tables — storage composition (heap vs indexes vs dead rows)
+  tool: get_storage_analysis
+  metric: index/heap size ratio + dead-row % on the biggest tables
+  thresholds:
+    kind: composition
+    index_warning_ratio: 2      # index size > 2x heap => over-indexed (WARNING)
+    index_critical_ratio: 5     # index size > 5x heap => extreme (CRITICAL)
+    dead_warning_pct: 20        # dead rows > 20% of live+dead (WARNING)
+    dead_critical_pct: 50       # dead rows > 50% on a very large table (CRITICAL)
+    huge_bytes: 107374182400    # 100 GB "very large" gate for the dead-row CRITICAL
+    notes: >
+      Indexes should not dwarf the heap; a high dead-row % on a huge table is severe bloat. Cross-check
+      the vacuum-and-bloat and index-hygiene investigations for root cause + remediation.
+  complementary:
+    - { tells: "Is the dead-row backlog an autovacuum problem", via: get_vacuum_stats_health }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+wal-directory-size:
+  catalog_id: CHK-028
+  title: WAL directory size — detect WAL accumulation (stuck slot / archive failure)
+  tool: get_storage_analysis
+  metric: WAL file count and total WAL bytes (worst of the two)
+  thresholds:
+    kind: two_metric
+    file_count_bands:
+      - { name: critical, min: 2000 }
+      - { name: warning,  min: 500 }
+      - { name: notice,   min: 100 }
+    total_bytes_bands:
+      - { name: critical, min: 53687091200 }   # > 50 GB
+      - { name: warning,  min: 10737418240 }    # > 10 GB
+      - { name: notice,   min: 5368709120 }     # > 5 GB
+    notes: >
+      Accumulating WAL usually means a stuck/abandoned replication slot or a failing archive_command.
+      Depends on wal_keep_size and workload. Requires pg_ls_waldir() privilege (rds_superuser on RDS).
+  complementary:
+    - { tells: "Is a replication slot holding WAL (inactive slot / old restart_lsn)", via: get_replication_status }
+  observability:
+    - { service: CloudWatch Metrics, signal: "TransactionLogsDiskUsage / CheckpointLag", prerequisite: "RDS/Aurora metric", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites:
+    - { setting: pg_ls_waldir privilege, where: "role grant", expected: "rds_superuser or pg_monitor", why: "the WAL directory listing is unavailable without it; report as a monitoring gap if absent" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+checkpoint-health:
+  catalog_id: CHK-029
+  title: Checkpoint health — share of forced (requested) checkpoints
+  tool: get_checkpoint_stats
+  metric: requested_pct = checkpoints_requested / (timed + requested)
+  thresholds:
+    kind: percent
+    bands:
+      - { name: critical, min: 50 }
+      - { name: warning,  min: 20 }
+      - { name: notice,   min: 10 }
+    notes: >
+      A high share of REQUESTED (forced) checkpoints means max_wal_size is too small for the write
+      workload — forced checkpoints cause I/O spikes. Also watch sync_time >> write_time (storage
+      saturated). PG17+ reads pg_stat_checkpointer; earlier reads pg_stat_bgwriter (tool handles both).
+  complementary:
+    - { tells: "Is max_wal_size sized for the workload", via: get_checkpoint_stats }
+  observability:
+    - { service: CloudWatch Metrics, signal: "WriteIOPS spikes aligned to checkpoints", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+bgwriter-efficiency:
+  catalog_id: CHK-030
+  title: Background writer efficiency — are backends forced to write/fsync dirty buffers
+  tool: get_bgwriter_stats
+  metric: buffers_backend_fsync / maxwritten_clean / buffers_backend vs buffers_clean
+  thresholds:
+    kind: state
+    backend_write_pct: 10   # buffers_backend > 10% of buffers_clean => backends doing bgwriter's job
+    states:
+      backend_fsync: CRITICAL      # buffers_backend_fsync > 0 (severe latency)
+      maxwritten_clean: WARNING    # bgwriter hit its write cap and stopped early
+      backends_writing: WARNING    # backends writing dirty buffers themselves
+    notes: >
+      PG17+ moved backend-write counters (buffers_backend / _fsync) from pg_stat_bgwriter to
+      pg_stat_io, so on PG17+ those two conditions cannot be evaluated from this view — say so rather
+      than implying health.
+  complementary: []
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+per-table-cache-hit:
+  catalog_id: CHK-019
+  title: Per-table buffer cache hit ratio — reads served from shared_buffers vs disk
+  tool: get_io_statistics
+  metric: table_cache_hit_ratio (%) — INVERSE (lower is worse); judged only above min_reads
+  thresholds:
+    kind: percent_below
+    min_reads: 1000    # only judge the ratio once this many disk reads have occurred
+    bands:             # worst-first; value strictly BELOW max wins
+      - { name: critical, max: 95 }
+      - { name: warning,  max: 99 }
+    notes: >
+      A low ratio with meaningful disk reads means the working set does not fit in shared_buffers /
+      instance memory. Corroborate with CloudWatch ReadIOPS / BufferCacheHitRatio; the fix is usually
+      more memory or a smaller hot set, not a per-table change.
+  complementary:
+    - { tells: "Is the whole database cache-cold or just this table", via: get_buffer_pool_stats }
+  observability:
+    - { service: CloudWatch Metrics, signal: "ReadLatency / ReadIOPS", healthy: "< 5ms", warning: "> 10ms sustained", critical: "> 20ms sustained", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+database-cache-hit:
+  catalog_id: CHK-032
+  title: Database-level buffer cache hit ratio — which databases are cache-cold
+  tool: get_buffer_pool_stats
+  metric: hit_ratio_percent (%) — INVERSE (lower is worse)
+  thresholds:
+    kind: percent_below
+    bands:
+      - { name: critical, max: 95 }
+      - { name: warning,  max: 99 }
+    notes: >
+      Aggregate across the whole database. A low ratio on an active database means the working set
+      exceeds shared_buffers / RAM. Context for the per-table cache-hit check.
+  complementary:
+    - { tells: "Which tables drive the misses", via: get_io_statistics }
+  observability:
+    - { service: CloudWatch Metrics, signal: "BufferCacheHitRatio / FreeableMemory", healthy: "> 25% RAM free", warning: "< 15% RAM", critical: "< 10% RAM", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+transaction-health:
+  catalog_id: CHK-021
+  title: Per-database transaction health — commit/rollback ratio (with XID age context)
+  tool: get_transaction_stats
+  metric: rollback_pct; severity = worse of the rollback bands and the shared XID model
+  thresholds:
+    kind: percent
+    bands:
+      - { name: critical, min: 10 }
+      - { name: warning,  min: 5 }
+    notes: >
+      A high rollback ratio points at application errors, deadlocks, or aborted transactions. XID age
+      severity reuses xid-wraparound-database (same numbers), so this check and the wraparound check
+      never disagree.
+  complementary:
+    - { tells: "Are rollbacks driven by deadlocks / lock contention", via: get_lock_analysis }
+  observability:
+    - { service: CloudWatch Metrics, signal: "MaximumUsedTransactionIDs (XID context)", healthy: "< 500M", warning: ">= 1B", critical: ">= 1.5B", prerequisite: "always available", investigation_lookback: "30 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+long-lived-sessions:
+  catalog_id: CHK-024
+  title: Long-lived client sessions — possible connection leaks or forgotten sessions
+  tool: get_session_duration_analysis
+  metric: session_age_seconds
+  thresholds:
+    kind: percent   # single-value bands over seconds
+    bands:
+      - { name: critical, min: 86400 }   # > 24h
+      - { name: warning,  min: 3600 }    # > 1h
+    notes: >
+      A long session may be a legitimate pooled connection — check application_name and state before
+      calling it a leak. Correlate with idle-in-transaction (that is the harmful variant: it holds
+      snapshots and blocks vacuum).
+  complementary:
+    - { tells: "Is the long session idle-in-transaction (holds snapshots / blocks vacuum)", via: get_current_activity }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+top-expensive-queries:
+  catalog_id: CHK-020
+  title: Top expensive queries — the primary optimization lever (pg_stat_statements)
+  tool: get_query_performance
+  metric: mean execution time (ms); plus temp-spill and per-query cache-hit flags
+  thresholds:
+    kind: query_perf
+    mean_time_bands:
+      - { name: critical, min: 1000 }
+      - { name: warning,  min: 500 }
+      - { name: notice,   min: 100 }
+    cache_hit_warning_below: 95      # a per-query cache hit ratio below this => WARNING
+    fallback_duration_bands:         # when pg_stat_statements is absent: running-query seconds
+      - { name: critical, min: 60 }
+      - { name: warning,  min: 30 }
+      - { name: notice,   min: 10 }
+    notes: >
+      Severity = worst of the mean-time band, a temp-spill flag (temp_blocks > 0 => WARNING), and a
+      per-query low-cache flag. Version-aware columns (PG13+ *_exec_time vs PG11-12 *_time) and a
+      pg_stat_activity fallback are handled in the tool. Requires pg_stat_statements for the primary path.
+  complementary:
+    - { tells: "Do the expensive queries spill to temp (work_mem pressure)", via: get_temp_file_queries }
+  observability:
+    - { service: Performance Insights, signal: "top SQL by db load (AAS)", prerequisite: "Performance Insights enabled", no_match: "not observable unless PI enabled" }
+  prerequisites:
+    - { setting: pg_stat_statements, where: "shared_preload_libraries + extension", expected: "installed", why: "the primary query ranking needs it; without it the tool falls back to live active queries only" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+function-performance:
+  catalog_id: CHK-022
+  title: Expensive user-defined functions / stored procedures
+  tool: get_function_performance
+  metric: avg_time_ms per function (with call count)
+  thresholds:
+    kind: function_perf
+    avg_critical_ms: 1000          # avg > 1s => CRITICAL
+    avg_warning_ms: 100            # avg > 100ms ...
+    warning_min_calls: 1000        # ... on > 1000 calls => WARNING
+    notes: >
+      Requires track_functions = 'all' or 'pl' (the tool reports when tracking is off — that is a
+      monitoring gap, not "healthy"). A single function dominating total server time is also worth
+      flagging (skill judgment).
+  complementary: []
+  observability:
+    - { service: CloudWatch Metrics, signal: "CPUUtilization (function CPU)", healthy: "< 70%", warning: "70-90%", critical: "> 90%", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites:
+    - { setting: track_functions, where: Parameter Group, expected: "all or pl", why: "pg_stat_user_functions is empty otherwise; report as a monitoring gap, not healthy" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+wait-events:
+  catalog_id: CHK-023
+  title: Current wait events — what sessions are blocked on right now
+  tool: get_wait_event_analysis
+  metric: session count per wait_event, weighted by wait_event_type
+  thresholds:
+    kind: wait_events
+    lock_warning_sessions: 2       # Lock:* with >= 2 sessions => WARNING
+    lock_critical_sessions: 10     # Lock:* with > 10 sessions => CRITICAL (severe contention)
+    io_warning_sessions: 5         # IO:* with > 5 sessions => WARNING
+    io_critical_sessions: 20       # IO:* with > 20 sessions => CRITICAL (storage bottleneck)
+    notes: >
+      Client:* / Activity:* / idle waits are NORMAL (OK) — do not flag ClientRead as a problem. Only
+      Lock:* (contention) and IO:* (storage) waits escalate with concurrency.
+  complementary:
+    - { tells: "Who is blocking whom (for Lock waits)", via: get_lock_analysis }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+temp-file-spills:
+  catalog_id: CHK-025
+  title: Queries spilling sorts/hashes to disk (work_mem pressure)
+  tool: get_temp_file_queries
+  metric: temp_blks_written per query
+  thresholds:
+    kind: percent    # single-value bands over temp_blks_written
+    bands:
+      - { name: critical, min: 10000 }
+      - { name: warning,  min: 1000 }
+    notes: >
+      Spills mean the sort/hash exceeded work_mem. Fix by raising work_mem (session/role-scoped, not
+      globally — it is per-operation memory) or rewriting the query. Requires pg_stat_statements.
+  complementary:
+    - { tells: "Is the spill from one of the top expensive queries", via: get_query_performance }
+  observability:
+    - { service: CloudWatch Metrics, signal: "WriteIOPS spikes from temp spills", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites:
+    - { setting: pg_stat_statements, where: "shared_preload_libraries + extension", expected: "installed", why: "temp spill attribution to a query needs pg_stat_statements" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+lock-contention:
+  catalog_id: CHK-033
+  title: Active lock contention — blocked queries, blockers, and deadlock history
+  tool: get_lock_analysis
+  metric: per-blocked-query wait_seconds; and deadlocks since stats reset
+  thresholds:
+    kind: lock
+    wait_seconds_bands:
+      - { name: critical, min: 60 }
+      - { name: warning,  min: 10 }
+    deadlock_bands:
+      - { name: critical, min: 10 }
+      - { name: warning,  min: 0 }
+    notes: >
+      A blocked query waiting > 60s (or a cascade of blocking chains) is CRITICAL. Deadlocks are
+      cumulative since the last stats reset — any is a WARNING, frequent (>10) is CRITICAL. Report the
+      blocker's client_addr / application_name, not just PIDs.
+  complementary:
+    - { tells: "The wait events behind the blocking", via: get_wait_event_analysis }
+    - { tells: "Is an idle-in-transaction session the blocker", via: get_current_activity }
+  observability: []
+  prerequisites:
+    - { setting: log_lock_waits, where: Parameter Group, expected: "on", why: "lock-wait log lines are absent otherwise; a no-match is INCONCLUSIVE" }
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+replication-health:
+  catalog_id: CHK-034
+  title: Replication health — role, slot lag, replica lag, sync config
+  tool: get_replication_status
+  metric: replication-slot lag (bytes) + replica replay lag (seconds)
+  thresholds:
+    kind: replication
+    lag_bytes_bands:
+      - { name: critical, min: 10737418240 }   # slot lag > 10 GB (disk-fill risk)
+      - { name: warning,  min: 1073741824 }     # slot lag > 1 GB
+    inactive_critical_bytes: 53687091200        # inactive slot > 50 GB = orphaned (WAL/disk fill)
+    replay_lag_seconds_bands:
+      - { name: critical, min: 30 }             # replica replay lag > 30s (stale reads)
+      - { name: warning,  min: 5 }              # > 5s
+    recovery_conflicts_bands:
+      - { name: warning,  min: 1 }              # any query cancelled by a recovery conflict on a reader
+    notes: >
+      An inactive slot pins WAL and risks filling disk (ties to the WAL-directory-size check). Aurora
+      readers use storage-level replication and do NOT appear in pg_stat_replication — judge Aurora
+      replica health via CloudWatch AuroraReplicaLag, not this list (replica lag targets: RDS < 1s,
+      Aurora < 20ms).
+  complementary:
+    - { tells: "Is the slot the reason WAL is accumulating", via: get_storage_analysis }
+  observability:
+    - { service: CloudWatch Metrics, signal: "AuroraReplicaLag / ReplicaLag / OldestReplicationSlotLag", healthy: "< 1s (RDS) / < 20ms (Aurora)", warning: "> 5s", critical: "> 30s", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+wal-configuration:
+  catalog_id: CHK-035
+  title: WAL configuration + WAL sender status
+  tool: get_wal_status
+  metric: wal_level; per-sender streaming state
+  thresholds:
+    kind: state
+    states:
+      sender_recovering: WARNING   # a sender in catchup/backup/startup (not yet streaming)
+    notes: >
+      wal_level = 'minimal' means replication is impossible (CRITICAL). archive_mode = 'off' on
+      production risks PITR. Aurora readers never appear in pg_stat_replication (storage-level
+      replication) — do NOT treat their absence here as a fault; judge via AuroraReplicaLag.
+  complementary:
+    - { tells: "Actual replica lag / slot lag", via: get_replication_status }
+  observability:
+    - { service: RDS Events, signal: "replication disconnect / failover events", prerequisite: "management events (default)", investigation_lookback: "7 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+logical-replication-health:
+  catalog_id: CHK-036
+  title: Logical replication health — logical slot lag, publications, subscriptions
+  tool: get_logical_replication
+  metric: logical-slot lag (bytes) + subscription enabled state
+  thresholds:
+    kind: replication
+    lag_bytes_bands:
+      - { name: critical, min: 10737418240 }   # logical slot lag > 10 GB
+      - { name: warning,  min: 1073741824 }     # > 1 GB
+    inactive_critical_bytes: 53687091200        # orphaned logical slot > 50 GB (common after a CDC/DMS job ends)
+    notes: >
+      A disabled subscription (subenabled = false) risks data divergence (WARNING). Abandoned logical
+      slots from finished CDC/DMS jobs are the classic WAL-fill offender. pg_subscription needs
+      superuser — the tool degrades gracefully (reports the gap) for a read-only role.
+  complementary:
+    - { tells: "Is the logical slot pinning WAL / filling disk", via: get_storage_analysis }
+  observability:
+    - { service: CloudWatch Metrics, signal: "TransactionLogsDiskUsage from a stuck logical slot", prerequisite: "RDS/Aurora metric", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+idle-connections:
+  catalog_id: CHK-013
+  title: Idle connections consuming slots without doing work
+  tool: get_idle_connections
+  metric: idle_seconds per connection
+  thresholds:
+    kind: percent   # single-value bands over idle seconds
+    bands:
+      - { name: critical, min: 3600 }   # idle > 1h
+      - { name: warning,  min: 900 }    # idle > 15m
+      - { name: notice,   min: 300 }    # idle > 5m
+    notes: >
+      A plain 'idle' session (not idle-in-transaction) wastes a slot + backend memory but holds no
+      snapshot. The real risk is slot buildup toward max_connections — a pooler (RDS Proxy / PgBouncer)
+      is the fix. idle-in-transaction is the harmful variant (see current-activity / lock-contention).
+  complementary:
+    - { tells: "Total connections vs max_connections (slot pressure)", via: get_current_activity }
+  observability:
+    - { service: CloudWatch Metrics, signal: "DatabaseConnections vs max", healthy: "< 70% of max", warning: "> 80%", critical: "> 90%", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+connection-pooling-efficiency:
+  catalog_id: CHK-031
+  title: Connection pooling efficiency — churn and pool oversize
+  tool: get_connection_pooling_efficiency
+  metric: very_short_sessions % (churn) and long_idle % (oversized), worst of the two
+  thresholds:
+    kind: pooling
+    churn_bands:
+      - { name: critical, min: 30 }   # > 30% very-short sessions = severe churn
+      - { name: warning,  min: 10 }
+    oversized_bands:
+      - { name: critical, min: 80 }   # > 80% long-idle = pool massively oversized
+      - { name: warning,  min: 50 }
+    notes: >
+      High churn (many < 10s sessions) = no connection reuse (a pooler would help). High long-idle =
+      the pool is larger than the workload needs. Both waste resources in different directions.
+  complementary:
+    - { tells: "Are idle connections building toward max_connections", via: get_idle_connections }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+current-activity-snapshot:
+  catalog_id: CHK-037
+  title: Real-time activity snapshot — connection utilization + idle-in-transaction
+  tool: get_current_activity
+  metric: usage_pct (connections / max_connections); idle_in_transaction(aborted)
+  thresholds:
+    kind: percent
+    usage_pct_bands:
+      - { name: critical, min: 90 }   # approaching max_connections
+      - { name: warning,  min: 80 }
+      - { name: notice,   min: 70 }
+    notes: >
+      idle_in_transaction_aborted > 0 is a hard CRITICAL (broken transactions holding locks). Connection
+      exhaustion (usage_pct near 100) can block diagnosis itself — note which checks could not run.
+  complementary:
+    - { tells: "Who is idle-in-transaction / holding snapshots", via: get_current_activity }
+    - { tells: "Is a lock cascade forming", via: get_lock_analysis }
+  observability:
+    - { service: CloudWatch Metrics, signal: "DatabaseConnections", healthy: "< 70% of max", warning: "> 80%", critical: "> 90%", prerequisite: "always available", investigation_lookback: "point-in-time / last 15 min" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+long-running-transactions:
+  catalog_id: CHK-049
+  title: Long-running active transactions — hold XID pins, block autovacuum freeze
+  tool: get_current_activity
+  metric: txn_duration_seconds of active transactions (+ backend_xmin age via snapshot_holders)
+  thresholds:
+    kind: percent   # single-value bands over transaction age seconds
+    txn_seconds_bands:
+      - { name: critical, min: 3600 }   # txn > 1h
+      - { name: warning,  min: 1800 }   # txn > 30m
+    notes: >
+      A long-running transaction pins backend_xmin, which blocks autovacuum from cleaning dead tuples
+      AND holds back XID freeze / replication-slot advancement. Cross-links vacuum-and-bloat and
+      transaction-wraparound. The vacuum-blocker rule (from snapshot_holders): xmin_age_xids > 1,000,000
+      AND dead tuples exist — an idle session with NULL/age-0 backend_xmin is NOT a blocker.
+  complementary:
+    - { tells: "Held-snapshot backend_xmin age (the vacuum-blocker signal)", via: get_current_activity }
+    - { tells: "Is it also blocking a replication slot from advancing", via: get_replication_status }
+  observability:
+    - { service: CloudWatch Logs, signal: "WARNING .* oldest xmin", prerequisite: "log export enabled", no_match: "INCONCLUSIVE unless prerequisite confirmed", investigation_lookback: "7 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+connection-characterization:
+  catalog_id: CHK-038
+  title: Connection characterization — pooling, application/client dominance, churn
+  tool: get_connection_analysis
+  metric: single-application % / single-client-IP % / connection churn (< 1 min bucket %)
+  thresholds:
+    kind: characterization
+    churn_bands:
+      - { name: critical, min: 50 }   # > 50% of sessions < 1 min old = connection storm
+      - { name: warning,  min: 30 }   # > 30% = severe churn
+    app_warning_pct: 60               # a single application > 60% of connections = WARNING
+    client_critical_pct: 80           # a single client IP > 80% of connections = CRITICAL
+    notes: >
+      A pooler (PgBouncer/pgpool/odyssey/RDS Proxy) is expected to concentrate connections — read
+      dominance alongside pooling_detection. High churn = no reuse (a pooler would help). Always report
+      the dominant application_name / client_addr, not just counts.
+  complementary:
+    - { tells: "Is a pooler in front (expected concentration)", via: get_connection_analysis }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+workload-mix:
+  catalog_id: CHK-039
+  title: Current workload mix — read/write/DDL/COPY distribution of live queries
+  tool: get_workload_characterization
+  metric: presence of active DDL / dominant COPY among running statements
+  thresholds:
+    kind: state
+    states:
+      ddl_active: WARNING    # a schema change running now = lock-contention risk
+      copy_active: NOTICE    # a bulk load running = I/O pressure
+    notes: >
+      Largely informational (is the DB read-/write-heavy right now). "DDL during peak" is a timing
+      judgment for the skill — the tool flags that DDL/COPY is active, not the schedule.
+  complementary: []
+  observability:
+    - { service: CloudWatch Metrics, signal: "CPUUtilization / WriteIOPS during the workload shift", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+workload-pattern:
+  catalog_id: CHK-040
+  title: Long-term workload profile — READ-HEAVY / WRITE-HEAVY / MIXED from cumulative stats
+  tool: get_workload_profile
+  metric: workload_type classification; rollback %; stats window age (reliability)
+  thresholds:
+    kind: workload
+    min_stats_days: 7        # below this the classification is unreliable (WARNING)
+    notes: >
+      'NO ACTIVITY' on a production database is CRITICAL (something is wrong). Rollback severity reuses
+      the transaction-health bands so the two checks agree. Cumulative since the last stats reset — a
+      short window (stats_days < min) makes the READ/WRITE classification unreliable.
+  complementary:
+    - { tells: "Is the rollback rate an application/deadlock problem", via: get_transaction_stats }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+system-parameter-audit:
+  catalog_id: CHK-041
+  title: System parameter audit — performance, replication, logging, security, autovacuum settings
+  tool: get_db_configuration
+  metric: key parameter values vs safe invariants
+  thresholds:
+    kind: config
+    # Safety INVARIANTS (not tunable bands): these values are always dangerous.
+    critical_params:
+      - { name: autovacuum, bad: "off", severity: CRITICAL, msg: "autovacuum globally OFF (wraparound risk)" }
+      - { name: wal_level,  bad: "minimal", severity: CRITICAL, msg: "wal_level=minimal (no replication/PITR)" }
+      - { name: ssl,        bad: "off", severity: CRITICAL, msg: "ssl=off (unencrypted connections allowed)" }
+    require_preload: [pg_stat_statements]
+    notes: >
+      Never cite a parameter's value or "default" from memory — the tool returns the effective value +
+      source. Aurora/RDS ship non-default values; changes go through the parameter group. shared_buffers
+      / work_mem sizing depends on instance RAM (a tuning judgment, left to the skill), so only the hard
+      invariants are auto-flagged here.
+  complementary:
+    - { tells: "Are per-db/role overrides masking the global config", via: get_setting_overrides }
+  observability:
+    - { service: CloudTrail, signal: "ModifyDBParameterGroup", prerequisite: "management events (default)", investigation_lookback: "30 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+role-audit:
+  catalog_id: CHK-042
+  title: Database role audit — superusers, login/replication roles, RLS bypass, expired passwords
+  tool: get_security_audit
+  metric: superuser count; RLS-bypassing login roles
+  thresholds:
+    kind: security
+    max_superusers: 3
+    # AWS-managed service roles. RDS reserves these names; a customer cannot modify them, so
+    # flagging them as high-risk is noise that buries real customer superusers. Excluded from
+    # the superuser count and the risk flag (and marked managed_role for transparency); nothing
+    # is removed from the database, only from the findings. Customer superusers still flag.
+    managed_roles: [rdsadmin, rdsproxyadmin, rdsrepladmin, rdswriteforwarduser, rds_superuser, rdstopmgr]
+    notes: >
+      Minimal superusers (1-2 expected). bypasses_rls on a login-capable non-admin role is a security
+      risk (WARNING). AWS-managed roles (managed_roles) are not counted or flagged — the customer cannot
+      act on them. Read-only audit — findings are review items; role changes are the operator's.
+  complementary:
+    - { tells: "What those roles can actually access", via: get_security_audit }
+  observability:
+    - { service: CloudTrail, signal: "CreateDBInstance role / GRANT events (privilege escalation)", prerequisite: "management events (default)", investigation_lookback: "90 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+schema-privilege-audit:
+  catalog_id: CHK-043
+  title: Schema & table privilege audit — who can access/modify what
+  tool: get_security_audit
+  metric: PUBLIC broad access; unexpected DELETE/TRUNCATE grants
+  thresholds:
+    kind: security
+    notes: >
+      PUBLIC with table privileges is broad exposure (WARNING). "Expected vs unexpected" is
+      site-specific — the tool lists grantee → schema → privileges as facts; the skill compares against
+      intended access. Read-only audit.
+  complementary:
+    - { tells: "Which roles are superusers / bypass RLS", via: get_security_audit }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+connection-encryption:
+  catalog_id: CHK-044
+  title: Connection encryption — encrypted vs unencrypted (SSL/TLS) sessions
+  tool: get_security_audit
+  metric: unencrypted connection count vs encrypted
+  thresholds:
+    kind: security
+    notes: >
+      Any unencrypted connection is potential exposure (WARNING); unencrypted dominating is CRITICAL.
+      Enforce with rds.force_ssl = 1 (RDS) / a pg_hba/parameter-group change. Expect ~5-15% throughput
+      overhead when forcing SSL — a large drop suggests the app is not reusing TLS sessions.
+  complementary: []
+  observability:
+    - { service: CloudWatch Metrics, signal: "throughput change after forcing SSL", prerequisite: "always available", investigation_lookback: "3 days (Period=5min)" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+row-level-security:
+  catalog_id: CHK-045
+  title: Row-Level Security status — RLS enablement, force status, policy coverage
+  tool: get_security_audit
+  metric: tables with RLS enabled but no policy; policies present but RLS off
+  thresholds:
+    kind: security
+    notes: >
+      rls_enabled with policy_count = 0 blocks all non-owner access (WARNING). A multi-tenant table with
+      rls_forced = false while the app connects as the owner means RLS is BYPASSED (tenant data-leak
+      risk — CRITICAL; a skill judgment needing app-connection context).
+  complementary: []
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+audit-logging-config:
+  catalog_id: CHK-046
+  title: Audit logging configuration — pgaudit presence + core logging params (compliance)
+  tool: get_security_audit
+  metric: pgaudit installed?; log_statement / log_connections / log_disconnections
+  thresholds:
+    kind: security
+    notes: >
+      pgaudit not installed = no granular audit (WARNING; CRITICAL on a compliance-regulated DB).
+      log_statement = none = no SQL logging (WARNING). True audit-trail confirmation is CW Logs
+      "AUDIT:" entries (INCONCLUSIVE if log export is unconfirmed).
+  complementary:
+    - { tells: "Is pgaudit actually installed (extension inventory)", via: get_extension_inventory }
+  observability:
+    - { service: CloudWatch Logs, signal: "AUDIT: entries on expected cadence", prerequisite: "pgaudit + log export", no_match: "INCONCLUSIVE unless prerequisite confirmed (possible compliance gap)", investigation_lookback: "7 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+sensitive-data-discovery:
+  catalog_id: CHK-047
+  title: Sensitive data discovery — heuristic PII/credential column detection
+  tool: get_security_audit
+  metric: detected column types (Credential / Credit Card / Email / ...)
+  thresholds:
+    kind: security
+    notes: >
+      A Credit Card column in plaintext is a PCI-DSS violation (CRITICAL); a Credential column
+      (password/secret/token) is WARNING; other PII is NOTICE. Heuristic by column NAME — it flags
+      candidates for review (confirm contents + access controls), not confirmed exposure.
+  complementary:
+    - { tells: "Which roles can read the flagged columns", via: get_security_audit }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+parameter-overrides:
+  catalog_id: CHK-048
+  title: Database & role parameter overrides (ALTER DATABASE/ROLE ... SET) vs global config
+  tool: get_setting_overrides
+  metric: presence of overrides; security-sensitive override keywords
+  thresholds:
+    kind: overrides
+    warning_keywords: ["work_mem", "statement_timeout=0", "idle_in_transaction"]
+    critical_keywords: ["autovacuum=off", "autovacuum_enabled=false", "log_statement=none"]
+    notes: >
+      Any override is a review item (NOTICE) — it can silently mask the global config. Overrides that
+      disable vacuum or hide activity from audit (log_statement=none per role) are the dangerous ones.
+  complementary:
+    - { tells: "What the global config is that the override changes", via: get_db_configuration }
+  observability:
+    - { service: CloudTrail, signal: "ModifyDBParameterGroup / ALTER ROLE events", prerequisite: "management events (default)", investigation_lookback: "30 days" }
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+extension-inventory:
+  catalog_id: CHK-051
+  title: Extension inventory & versions — expected extensions present + upgrades available
+  tool: get_extension_inventory
+  metric: missing expected extensions; installed vs latest available version
+  thresholds:
+    kind: extensions
+    expected: [pg_stat_statements, pgstattuple, pgaudit]
+    critical_if_missing: [pg_stat_statements]   # blind to query performance without it
+    notes: >
+      A missing expected extension is WARNING (CRITICAL for pg_stat_statements — the diagnostics depend
+      on it; pgaudit missing is a compliance gap on regulated DBs). An available version upgrade is a
+      NOTICE. On RDS/Aurora, extensions are created via CREATE EXTENSION and may need shared_preload_libraries.
+  complementary:
+    - { tells: "Is shared_preload_libraries set for preload-required extensions", via: get_db_configuration }
+  observability: []
+  prerequisites: []
+  provenance: { source: "maintainer review", last_reviewed: "2026-06-18" }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Remediation safety (not a CHK). Read by streaming/remediation_screen.py, NOT by a
+# diagnostic tool. When one of these verbs appears as a runnable statement inside a
+# fenced code block of an answer, the screen attaches an advisory caution beside the
+# answer. Tuning here changes what is flagged; it never blocks or edits the answer, and
+# SQL quoted inline in prose (how the agent discusses a customer's own statements) is
+# never inspected.
+remediation-safety:
+  description: Destructive statements an answer must not present as a runnable fix uncautioned.
+  thresholds:
+    never_runnable: [DROP, TRUNCATE]   # no safe copy-paste form; cautioned whenever shown in a run block
+    require_where:  [DELETE, UPDATE]   # cautioned only with no WHERE clause (affects every row)
+  provenance: { source: "maintainer review", last_reviewed: "2026-10-07" }

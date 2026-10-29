@@ -1,0 +1,240 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  DBOps Agent - Amazon Bedrock Guardrails, created in the customer's own account.
+  Two guardrails, one per direction. The input guardrail screens a single user turn
+  via ApplyGuardrail before it reaches the agent: prompt-attack (jailbreak/injection)
+  detection, content filters, and PII. The model guardrail is attached to every
+  Converse call and screens responses only, so replayed conversation history is never
+  re-assessed. Secure-by-default, parameterized, and fail-soft: disabling it yields
+  empty outputs so the app runs with no guardrail.
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+    Description: >
+      Prefix for every physical resource name.
+  EnableGuardrail:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: >
+      Create and attach the Bedrock Guardrails. When 'false', neither guardrail is
+      created and every output is empty (app runs guardrail-free).
+  GuardrailContentStrength:
+    Type: String
+    AllowedValues: ['NONE', 'LOW', 'MEDIUM', 'HIGH']
+    Default: 'LOW'
+    Description: >
+      Strength for content filters (hate, insults, sexual, violence, misconduct).
+      LOW is baseline hygiene for an internal tool; NONE disables a category.
+  GuardrailPromptAttackStrength:
+    Type: String
+    AllowedValues: ['NONE', 'LOW', 'MEDIUM', 'HIGH']
+    Default: 'MEDIUM'
+    Description: >
+      Strength for prompt-attack (jailbreak/injection) detection on input. MEDIUM
+      balances injection coverage vs false positives for a trusted employee population.
+  GuardrailPiiAction:
+    Type: String
+    AllowedValues: ['ANONYMIZE', 'BLOCK']
+    Default: 'ANONYMIZE'
+    Description: >
+      Action for detected PII. ANONYMIZE masks inline (diagnosis still returns); BLOCK
+      stops the content. Default ANONYMIZE (redact, don't block). A PII policy carries
+      no input/output split, so BLOCK also applies to the conversation history replayed
+      on each Converse request - in a session where any turn mentions a name or an email
+      address, that blocks every later request. ANONYMIZE masks the same content and
+      leaves the session usable.
+
+Conditions:
+  GuardrailEnabled: !Equals [!Ref EnableGuardrail, 'true']
+
+Resources:
+  # A single guardrail for the whole agent. Prompt-attack is input-only (OutputStrength
+  # MUST be NONE per Bedrock). PII entities are redacted on output; IP_ADDRESS is
+  # intentionally omitted so diagnostic IPs aren't scrubbed. Contextual
+  # grounding is intentionally NOT configured - grounding is owned by the
+  # deterministic findings layer in the application.
+  #
+  # For indirect prompt injection via tool results or database content, the naive fix
+  # "flip PROMPT_ATTACK OutputStrength to non-NONE" is REJECTED by the Bedrock API
+  # (PROMPT_ATTACK is input-only), so it is intentionally NOT applied here. The real
+  # mitigations for DB-content-coerces-a-tool-call ship in the Group A app layer
+  # (SSRF host-allowlist, sensitive-catalog blocklist, secret_arn stripping, IAM
+  # scoping) plus the content-filter OutputStrength below (GuardrailContentStrength),
+  # which screens egress. Raising GuardrailContentStrength toward MEDIUM/HIGH is the
+  # supported lever if stronger egress screening is wanted.
+  AgentGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Condition: GuardrailEnabled
+    Properties:
+      # Bedrock caps guardrail Name at 50 chars. Derive it from AccountId (not
+      # AWS::StackName): as a NESTED stack the stack name is a long auto-generated
+      # string (parent-LogicalId-random) that blows past 50. AccountId keeps the
+      # name deterministic, unique per account, and well under the limit
+      # (a 21-char prefix, the maximum, gives 44).
+      #
+      # Renaming this resource's LOGICAL ID requires changing this Name in the same
+      # change. CloudFormation replaces create-then-delete, so the incoming guardrail
+      # asks Bedrock for a name the outgoing one still holds, and Bedrock refuses a
+      # duplicate ("Another guardrail in your account already has this name") - the
+      # update fails and rolls back. True of any resource carrying an explicit,
+      # uniqueness-constrained name. The sibling permissions boundary in api.yaml
+      # avoids it only because its ManagedPolicyName changed along with its logical
+      # ID. A fresh deployment is unaffected: there is no outgoing resource.
+      Name: !Sub '${ResourcePrefix}-guardrail-${AWS::AccountId}'
+      Description: 'DBOps Agent - prompt-attack, PII redaction, content filters.'
+      BlockedInputMessaging: 'Your request was blocked by a safety guardrail. Please rephrase.'
+      BlockedOutputsMessaging: 'The response was blocked by a safety guardrail.'
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: HATE
+            InputStrength: !Ref GuardrailContentStrength
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: INSULTS
+            InputStrength: !Ref GuardrailContentStrength
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: SEXUAL
+            InputStrength: !Ref GuardrailContentStrength
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: VIOLENCE
+            InputStrength: !Ref GuardrailContentStrength
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: MISCONDUCT
+            InputStrength: !Ref GuardrailContentStrength
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: PROMPT_ATTACK
+            InputStrength: !Ref GuardrailPromptAttackStrength
+            OutputStrength: NONE
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: NAME
+            Action: !Ref GuardrailPiiAction
+          - Type: EMAIL
+            Action: !Ref GuardrailPiiAction
+          - Type: PHONE
+            Action: !Ref GuardrailPiiAction
+          - Type: ADDRESS
+            Action: !Ref GuardrailPiiAction
+          - Type: US_SOCIAL_SECURITY_NUMBER
+            Action: !Ref GuardrailPiiAction
+          - Type: CREDIT_DEBIT_CARD_NUMBER
+            Action: !Ref GuardrailPiiAction
+          # US_BANK_ACCOUNT_NUMBER intentionally omitted: it matches 12-digit AWS
+          # account IDs, mangling them in reports (it masks the leading digits and
+          # leaves the rest), which is both wrong and ineffective.
+          - Type: PASSWORD
+            Action: !Ref GuardrailPiiAction
+          - Type: AWS_SECRET_KEY
+            Action: !Ref GuardrailPiiAction
+
+  # Pin an immutable version (don't track DRAFT) so behavior is reproducible.
+  AgentGuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Condition: GuardrailEnabled
+    Properties:
+      GuardrailIdentifier: !GetAtt AgentGuardrail.GuardrailId
+      Description: 'Pinned Phase 1 version (prompt-attack + PII-redact + LOW content).'
+
+  # The guardrail ATTACHED TO THE MODEL, and therefore the one that sees every
+  # Converse request. It screens responses only: every content filter here carries
+  # InputStrength NONE, and PROMPT_ATTACK is absent rather than set to NONE/NONE.
+  #
+  # Input is screened separately, one turn at a time, by ApplyGuardrail against
+  # AgentGuardrail above. That split is required rather than tidy. A Converse request
+  # carries the whole replayed conversation, and a guardrail assesses the request it is
+  # given, so an input filter here re-reads every earlier turn on every request. One
+  # turn that scores above the threshold then blocks every later request in the session
+  # regardless of its own content, and no rewording recovers it because the offending
+  # text is in the history rather than the new message. Screening a single turn on its
+  # way in keeps the decision proportional to what the user actually typed, and lets a
+  # refused turn be dropped before it reaches conversation memory.
+  #
+  # Bedrock's own selective evaluation (a guardContent qualifier marking just the new
+  # turn) expresses this inside one Converse call, but strands-agents does not emit
+  # those qualifiers, so the boundary is drawn between two guardrails instead.
+  AgentModelGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Condition: GuardrailEnabled
+    Properties:
+      # 50-char Bedrock cap, as above: a 21-char prefix leaves this at 48.
+      Name: !Sub '${ResourcePrefix}-guardrail-out-${AWS::AccountId}'
+      Description: 'DBOps Agent - response screening (content filters + PII) on model output.'
+      BlockedInputMessaging: 'Your request was blocked by a safety guardrail. Please rephrase.'
+      BlockedOutputsMessaging: 'The response was blocked by a safety guardrail.'
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: HATE
+            InputStrength: NONE
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: INSULTS
+            InputStrength: NONE
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: SEXUAL
+            InputStrength: NONE
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: VIOLENCE
+            InputStrength: NONE
+            OutputStrength: !Ref GuardrailContentStrength
+          - Type: MISCONDUCT
+            InputStrength: NONE
+            OutputStrength: !Ref GuardrailContentStrength
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: NAME
+            Action: !Ref GuardrailPiiAction
+          - Type: EMAIL
+            Action: !Ref GuardrailPiiAction
+          - Type: PHONE
+            Action: !Ref GuardrailPiiAction
+          - Type: ADDRESS
+            Action: !Ref GuardrailPiiAction
+          - Type: US_SOCIAL_SECURITY_NUMBER
+            Action: !Ref GuardrailPiiAction
+          - Type: CREDIT_DEBIT_CARD_NUMBER
+            Action: !Ref GuardrailPiiAction
+          # US_BANK_ACCOUNT_NUMBER intentionally omitted: it matches 12-digit AWS
+          # account IDs, mangling them in reports (it masks the leading digits and
+          # leaves the rest), which is both wrong and ineffective.
+          - Type: PASSWORD
+            Action: !Ref GuardrailPiiAction
+          - Type: AWS_SECRET_KEY
+            Action: !Ref GuardrailPiiAction
+
+  AgentModelGuardrailVersion:
+    Type: AWS::Bedrock::GuardrailVersion
+    Condition: GuardrailEnabled
+    Properties:
+      GuardrailIdentifier: !GetAtt AgentModelGuardrail.GuardrailId
+      Description: 'Pinned response-screening version (content filters + PII on output).'
+
+Outputs:
+  InputGuardrailId:
+    Description: >
+      Id of the guardrail that screens one user turn (empty when disabled). Thread into
+      the app as GUARDRAIL_INPUT_ID.
+    Value: !If [GuardrailEnabled, !GetAtt AgentGuardrail.GuardrailId, '']
+  InputGuardrailVersion:
+    Description: 'Version of the input-screening guardrail. Thread in as GUARDRAIL_INPUT_VERSION.'
+    Value: !If [GuardrailEnabled, !GetAtt AgentGuardrailVersion.Version, '']
+  InputGuardrailArn:
+    Description: 'ARN of the input-screening guardrail, for least-privilege IAM scoping.'
+    Value: !If [GuardrailEnabled, !GetAtt AgentGuardrail.GuardrailArn, '']
+  ModelGuardrailId:
+    Description: >
+      Id of the guardrail attached to the model, screening responses (empty when
+      disabled). Thread into the app as GUARDRAIL_ID.
+    Value: !If [GuardrailEnabled, !GetAtt AgentModelGuardrail.GuardrailId, '']
+  ModelGuardrailVersion:
+    Description: 'Version of the model-attached guardrail. Thread in as GUARDRAIL_VERSION.'
+    Value: !If [GuardrailEnabled, !GetAtt AgentModelGuardrailVersion.Version, '']
+  ModelGuardrailArn:
+    Description: 'ARN of the model-attached guardrail, for least-privilege IAM scoping.'
+    Value: !If [GuardrailEnabled, !GetAtt AgentModelGuardrail.GuardrailArn, '']

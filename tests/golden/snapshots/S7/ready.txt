@@ -1,0 +1,15 @@
+Add secondary cloud source
+Connect another AWS account to this Agent Space: your access role must be in that account, then register the account here.
+1
+Set up the role
+2
+Connect to the Agent Space
+Secondary account ID *
+The AWS account that holds the databases.
+Role name
+Use a different name
+Your access role. One per account, shared by all your spaces.
+Your access role is already in this account (used by your space Orders). Nothing to run.
+Update the role's permissions
+Cancel
+Next

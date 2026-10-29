@@ -1,0 +1,7 @@
+Select a Space
+Choose which space to access.
+Payments
+<uuid>
+Analytics
+<uuid>
+Sign out

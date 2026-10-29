@@ -1,0 +1,412 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+#
+# Automated Security Helper configuration.
+#
+#   ash scan --mode container --output-dir pcsr/ash
+#
+# Container mode matters: local mode silently skips any scanner whose tool is
+# absent, which on a clean machine means cfn-nag, cdk-nag, grype and syft never
+# run. The container image carries all of them.
+#
+# Every suppression below records a finding that was read and assessed, with the
+# reason. That is the point of keeping this file in the repository: a reviewer can
+# see which findings were judged not to apply and disagree with any of them. Two
+# rules are deliberately NOT suppressed - AwsSolutions-S10 and the remaining
+# AwsSolutions-IAM4 - because they were fixed instead.
+
+project_name: dbops-agent
+
+global_settings:
+  severity_threshold: MEDIUM
+
+  ignore_paths:
+    - path: 'deployment/global-s3-assets/**'
+      reason: >-
+        Generated build output, not source. build-s3-dist.sh stages the templates
+        from infrastructure/ and backend/template.yaml into this directory, so
+        scanning it double-counts every infrastructure finding. Gitignored.
+    - path: 'pcsr/**'
+      reason: >-
+        Local scan output directory (gitignored, not source). It has to be excluded
+        explicitly because cdk-nag
+        renders each CloudFormation template into
+        pcsr/<run>/scanners/cdk-nag/**/ASHCDKNagScanner.template.json, and a later
+        run then scans those as if they were source - inflating the counts with
+        duplicates of findings already reported against infrastructure/.
+    - path: '**/.pytest_cache/**'
+      reason: >-
+        pytest's cache directory, gitignored and regenerated on every run. It is
+        not source and should not be scanned: CACHEDIR.TAG carries a fixed
+        signature hash that detect-secrets reads as a high-entropy string.
+    - path: 'deployment/.artifacts-env'
+      reason: >-
+        Written by build-s3-dist.sh with the staged template URL, the artifacts
+        bucket and a build version. Gitignored, per-machine, and absent from a clean
+        clone. Excluded rather than justified because whether it yields a finding at
+        all depends on the build version it happens to hold: a value containing hex
+        letters reads as a high-entropy string, one that is all digits does not. A
+        suppression here therefore alternated between used and unused across runs of
+        identical source, which is worse than not scanning a generated file.
+    - path: 'deployment/.images-env'
+      reason: >-
+        Same shape as .artifacts-env: written by build-images.sh with an
+        account-specific ECR registry and a timestamp tag. Gitignored, per-machine,
+        and not source.
+    - path: '**/__pycache__/**'
+      reason: 'Compiled bytecode, gitignored and regenerated. Not source.'
+    - path: '**/node_modules/**'
+      reason: >-
+        Vendored JavaScript dependencies, gitignored and never committed. Also
+        where grype reports Go standard-library CVEs compiled into the esbuild
+        binary: build-time only, not shipped in the deployed artefact (static
+        HTML/CSS/JS in Amazon S3), and fixed only when esbuild republishes
+        against a newer Go toolchain. Dependency versions are governed by
+        package.json and npm audit instead.
+
+  suppressions:
+    # ── bandit ────────────────────────────────────────────────────────────────
+    - path: '**/tests/**'
+      rule_id: 'B101'
+      reason: >-
+        assert is how the test suites express expectations. B101 exists because
+        assert is stripped under python -O; that argument does not apply to test
+        code, which is never run optimised.
+    - path: '**'
+      rule_id: 'B105'
+      reason: >-
+        Reviewed all 18 individually, not as a class, because a blanket
+        suppression here would hide a real credential. bandit anchors the finding
+        on the enclosing statement rather than the matched token, so the reported
+        lines often look unrelated to credentials. The matches are: comments and
+        blank lines (test_auth.py 103/109/114/120/125/158,
+        resource_explorer_client.py 140/222, test_trace_redaction.py 25,
+        generate-env.py 111); dictionary keys whose names contain a
+        credential-like word, assigned from variables rather than literals
+        (discovery_client.py 162/208 "security_group_ids": sg_ids); test fixture
+        data holding space UUIDs (test_list_monitored_scope.py 37-43); and two in
+        deployment/generate-env.py that are worth naming because the file reads a
+        real secret at deploy time - line 116 is the AWS CLI argument list
+        "--query", "UserPoolClient.ClientSecret", and line 117 compares the
+        result against the string "None". Both handle the secret; neither
+        contains one.
+    - path: '**'
+      rule_id: 'B110'
+      reason: >-
+        try/except/pass is deliberate at these sites: optional AWS lookups and
+        best-effort cleanup, where a failure must not abort the caller. Each site
+        either logs or has the reason written above it.
+    - path: '**'
+      rule_id: 'B112'
+      reason: 'try/except/continue in polling loops, where one failed iteration must not end the loop.'
+    - path: '**'
+      rule_id: 'B404'
+      reason: >-
+        subprocess import in build scripts, check scripts and test tooling,
+        invoked with fixed argument lists and never with shell=True. Nothing
+        deployed imports it: the callers are deployment/*.py, backend/scripts and
+        tests/, all of which run on a developer machine or in CI.
+    - path: '**'
+      rule_id: 'B603'
+      reason: >-
+        subprocess calls use fixed argument lists, no shell, and no untrusted
+        input. Two categories: build and check scripts that invoke git, npm and
+        aws; and tests that re-run this repository's own scripts to assert how
+        they behave. tests/test_noninteractive.py is the one worth naming - it
+        launches deployment/configure.py with stdin on a pty, because the bug it
+        guards against is a prompt that blocks when no one is there to answer,
+        and a pipe would not reproduce it. The argument list is built from
+        sys.executable and a path derived from __file__.
+    - path: '**'
+      rule_id: 'B607'
+      reason: 'Partial executable paths (git, npm, aws) resolved from PATH in developer tooling, not in anything deployed.'
+
+    # ── detect-secrets ────────────────────────────────────────────────────────
+    - path: '**'
+      rule_id: 'SECRET-SECRET-KEYWORD'
+      reason: >-
+        Reviewed all 16: every match is the word "secret" or "password", never a
+        value. They are the CloudFormation property GenerateSecret, the IAM
+        action secretsmanager:GetSecretValue, {{resolve:secretsmanager:...}}
+        dynamic references (which exist precisely so credentials are not
+        inlined), the UI label FORCE_CHANGE_PASSWORD, and a comparison against
+        the string "None".
+
+    # SECRET-HEX-HIGH-ENTROPY-STRING needs no entry. Its only match was
+    # ARTIFACTS_VERSION in deployment/.artifacts-env, and that generated file is now
+    # excluded under ignore_paths instead - see the reasoning there.
+
+    # ── checkov: the customer-managed-key family ──────────────────────────────
+    # One decision, not five findings. AWS-owned and AWS-managed keys encrypt
+    # these resources at rest already; a customer-managed key adds a per-key
+    # monthly charge and a key policy to maintain, for a sample whose data is
+    # health metrics about the customer's own databases. A customer who needs a
+    # CMK can supply one - the Bedrock AgentCore memory store already accepts
+    # MemoryKmsKeyArn on exactly that basis.
+    - path: '**'
+      rule_id: 'CKV_AWS_119'
+      reason: 'DynamoDB: AWS-owned key. See the customer-managed-key note above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_173'
+      reason: 'Lambda environment variables: AWS-managed key. See the customer-managed-key note above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_158'
+      reason: 'CloudWatch log groups: AWS-managed key. See the customer-managed-key note above.'
+    # CKV_AWS_149 (Secrets Manager encrypted with a customer-managed key) needs no
+    # entry. Its three occurrences were all on the Aurora master credential secret
+    # this repository used to declare; RDS owns that secret now, so there is no
+    # Secrets Manager resource here for the rule to evaluate.
+    - path: '**'
+      rule_id: 'CKV_AWS_35'
+      reason: 'CloudTrail: AWS-managed key. See the customer-managed-key note above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_27'
+      reason: 'SNS: AWS-managed key. See the customer-managed-key note above.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W84'
+      reason: 'cfn-nag equivalent of CKV_AWS_158 (log group encryption). See the customer-managed-key note above.'
+
+    # ── IAM wildcards, already reasoned about in the templates ────────────────
+    # These four rules all report the same thing from four tools. The wildcards
+    # that remain are the ones AWS accepts no resource form for -
+    # ecr:GetAuthorizationToken, bedrock:InvokeModel against a managed inference
+    # profile, batch:ListJobs and batch:DescribeJobs - plus read-only describes.
+    # Every write path that CAN be scoped is scoped: Secrets Manager to
+    # <prefix>/*, DynamoDB per table, batch:SubmitJob to this deployment's queue
+    # and job definition. tests/test_threat_model_guards.py fails if any of those
+    # regress to '*'.
+    - path: '**'
+      rule_id: 'AwsSolutions-IAM5'
+      reason: 'Wildcards limited to actions with no IAM resource form; scopeable writes are scoped. See the IAM note above.'
+    - path: '**'
+      rule_id: 'AwsSolutions-IAM4'
+      reason: >-
+        The AWS managed policies that remain are the three service roles that
+        exist to be attached this way: AWSLambdaBasicExecutionRole,
+        AWSLambdaVPCAccessExecutionRole and AmazonECSTaskExecutionRolePolicy.
+        Each is narrower than an equivalent hand-written policy and tracks
+        service changes. The two attachments that were NOT defensible -
+        CloudWatchLogsFullAccess on the API task role and on the AgentCore
+        runtime role, which granted logs:* account-wide including the ability to
+        delete this application's own audit trail - were replaced with scoped
+        inline policies rather than suppressed. See the CloudWatchLogsScoped
+        policy in infrastructure/api.yaml and backend/template.yaml, and the
+        guard in tests/test_threat_model_guards.py.
+    - path: '**'
+      rule_id: 'CKV_AWS_111'
+      reason: 'Same wildcard set as AwsSolutions-IAM5. See the IAM note above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_107'
+      reason: 'Heuristic on read actions in a policy. Same wildcard set as AwsSolutions-IAM5.'
+    - path: '**'
+      rule_id: 'CKV_AWS_108'
+      reason: 'Heuristic on read actions in a policy. Same wildcard set as AwsSolutions-IAM5.'
+    - path: '**'
+      rule_id: 'CKV_AWS_109'
+      reason: 'No policy grants IAM permissions management; role creation is bounded by a permissions boundary.'
+    # CFN_NAG_W11 needs no entry here: the roles that would raise it already carry
+    # a cfn_nag rules_to_suppress block in their own Metadata, with the reasoning
+    # next to the policy it applies to, so cfn-nag never reports it up to ASH.
+    - path: '**'
+      rule_id: 'CKV_SECRET_6'
+      reason: >-
+        Not a secret. The match is a line of Python in an inline Lambda in
+        backend/template.yaml - `_client_secret =
+        resp["UserPoolClient"]["ClientSecret"]` - which reads the value out of a
+        describe_user_pool_client response at runtime. The M2M client secret is
+        generated by Cognito (GenerateSecret: true) and never written into
+        CloudFormation.
+        DO NOT TAKE THIS ON TRUST: scanner reports redact the matched value, so
+        this justification is unverifiable from the report alone, which is a fair
+        objection to any suppression. Run
+        `python3 tests/test_threat_model_guards.py` instead - it asserts that no
+        template in this repository contains a credential literal, that the flagged
+        line is still a read rather than an assignment, and that the client secret
+        is Cognito-generated. That is the claim, executable.
+
+    # ── CloudFront: not settable with the default certificate ─────────────────
+    - path: '**'
+      rule_id: 'AwsSolutions-CFR4'
+      reason: >-
+        Neither distribution declares a ViewerCertificate, so both use the
+        default *.cloudfront.net certificate, for which CloudFront fixes the
+        minimum protocol and MinimumProtocolVersion cannot be set. Raising it
+        requires a custom domain and an ACM certificate, which is a customer
+        decision - noted in the README as an improvement.
+    - path: '**'
+      rule_id: 'CKV_AWS_174'
+      reason: 'Same as AwsSolutions-CFR4: default CloudFront certificate, minimum protocol not settable.'
+    - path: '**'
+      rule_id: 'AwsSolutions-CFR1'
+      reason: 'Geo restriction not applied: an operations console has no geographic access policy to express for a sample.'
+
+    # ── logging that a higher layer already covers ────────────────────────────
+    - path: '**'
+      rule_id: 'AwsSolutions-S1'
+      reason: >-
+        S3 server access logging is not enabled on the two SPA asset buckets.
+        Both are reached only through CloudFront with Origin Access Control, and
+        both distributions already log every request to a dedicated log bucket -
+        so bucket-level logging would record only OAC-originated fetches, which
+        is strictly less information than the distribution log already holds.
+    - path: '**'
+      rule_id: 'CFN_NAG_W35'
+      reason: 'cfn-nag equivalent of AwsSolutions-S1. See above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_18'
+      reason: 'checkov equivalent of AwsSolutions-S1. See above.'
+    - path: '**'
+      rule_id: 'AwsSolutions-ELB2'
+      reason: >-
+        The ALB is internal (Scheme: internal) and every request reaches it
+        through API Gateway over a VPC Link, and the API Gateway stage access log
+        already records source IP, route, status and latency for each one. This
+        is written up on the resource itself.
+    - path: '**'
+      rule_id: 'CKV_AWS_91'
+      reason: 'checkov equivalent of AwsSolutions-ELB2. See above.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W52'
+      reason: 'cfn-nag equivalent of AwsSolutions-ELB2. See above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_21'
+      reason: >-
+        Versioning is not enabled on the two SPA asset buckets. Their contents
+        are build output, reproducible from source by `make deploy`, and every
+        deployment replaces them wholesale - so retained versions would
+        accumulate stale bundles without adding a recovery path that rebuilding
+        does not already provide.
+    - path: '**'
+      rule_id: 'CKV_AWS_67'
+      reason: 'CloudTrail log file validation: the trail is a convenience for the sample, not a compliance artefact.'
+
+    # ── deliberate design choices ─────────────────────────────────────────────
+    - path: '**'
+      rule_id: 'AwsSolutions-APIG4'
+      reason: >-
+        One route is unauthenticated: GET /ping, the health check. Every other
+        route on all four verbs carries the Cognito JWT authorizer, which
+        tests/test_threat_model_guards.py asserts.
+    - path: '**'
+      rule_id: 'AwsSolutions-L1'
+      reason: 'Lambda runtimes are pinned deliberately so a customer deployment is reproducible rather than shifting under them.'
+    - path: '**'
+      rule_id: 'CKV_AWS_117'
+      reason: >-
+        The Lambdas outside the VPC only call AWS APIs over public endpoints
+        (Cognito bootstrap, schema init). Placing them in the VPC would require
+        NAT or interface endpoints for no security gain.
+    - path: '**'
+      rule_id: 'CFN_NAG_W89'
+      reason: 'cfn-nag equivalent of CKV_AWS_117. See above.'
+    - path: '**'
+      rule_id: 'CKV_AWS_116'
+      reason: >-
+        No dead-letter queue on these functions. Each is either invoked
+        synchronously by CloudFormation during deployment, where a failure fails
+        the stack visibly, or is a scheduled collector whose next run supersedes
+        a missed one.
+    - path: '**'
+      rule_id: 'AwsSolutions-SQS3'
+      reason: 'The queue in question IS a dead-letter queue, so it does not itself need one.'
+    - path: '**'
+      rule_id: 'AwsSolutions-SQS4'
+      reason: 'SSL is not enforced by queue policy; the only producers and consumers are AWS services reached over TLS by default.'
+    - path: '**'
+      rule_id: 'AwsSolutions-ECS2'
+      reason: >-
+        The task definition carries environment variables, but none of them is a
+        credential. The invariant, rather than a list that goes stale as variables
+        are added: every value is either a deployment-time identifier (resource
+        name, ARN, region, VPC or pool id), a feature flag, or a public
+        configuration constant such as the OAuth scope that identifies the service
+        principal. Secret material is read at point of use through
+        secretsmanager:GetSecretValue, and the metrics store (DynamoDB and
+        CloudWatch) is reached with the task role, so there is nothing to place
+        here in the first place.
+    # AwsSolutions-SMG4 needs no entry: there is no longer an
+    # AWS::SecretsManager::Secret anywhere in this repository for it to flag. The
+    # Aurora master credential is created and rotated by RDS through
+    # ManageMasterUserPassword on the cluster. It was briefly suppressed with the
+    # reasoning "rotation needs a rotation Lambda with network access to the cluster;
+    # the added moving part is a worse trade" - wrong on the facts, since AWS supplies
+    # the function - and then briefly implemented as a RotationSchedule, which failed
+    # to deploy because HostedRotationLambda requires the AWS::SecretsManager
+    # transform. Handing it to RDS removes the secret, the rotation function, the
+    # transform and the VPC plumbing at once.
+    - path: '**'
+      rule_id: 'AwsSolutions-RDS11'
+      reason: 'The metrics store listens on the default PostgreSQL port. It is not internet-reachable, so a non-default port buys obscurity only.'
+    - path: '**'
+      rule_id: 'CKV_AWS_118'
+      reason: 'Enhanced monitoring is not enabled on the internal metrics store; Performance Insights and CloudWatch already cover it.'
+    - path: '**'
+      rule_id: 'CKV_AWS_2'
+      reason: >-
+        The ALB listener is HTTP on the VPC-internal hop only. TLS terminates at
+        API Gateway, which reaches the ALB over a VPC Link; the load balancer is
+        Scheme: internal and admits nothing else.
+    - path: '**'
+      rule_id: 'CKV_AWS_103'
+      reason: 'Same as CKV_AWS_2: no TLS listener to set a policy on, because the internal hop is HTTP behind API Gateway.'
+    - path: '**'
+      rule_id: 'CKV_AWS_364'
+      reason: 'Lambda concurrency is unreserved; these functions are deployment-time or scheduled and do not compete for account concurrency.'
+
+    # ── security groups: egress ───────────────────────────────────────────────
+    - path: '**'
+      rule_id: 'AwsSolutions-EC23'
+      reason: >-
+        The rule text says "inbound", which reads as a contradiction of this
+        justification, so to be explicit: the reported line numbers
+        (api.yaml:808, vpc.yaml:332, vpc.yaml:362) point at the
+        AWS::EC2::SecurityGroup resource header, not at a rule. cdk-nag flags the
+        group when it finds a broad CIDR anywhere within it and does not
+        distinguish direction. Every 0.0.0.0/0 on a security group in these
+        templates is under SecurityGroupEgress (api.yaml 778/802/823,
+        vpc.yaml 345/375); the two in vpc.yaml at 248 and 316 are
+        DestinationCidrBlock route entries for the NAT and internet gateways, not
+        security group rules at all. Every ingress rule names either a
+        SourceSecurityGroupId or a VPC CIDR parameter. Outbound is open because
+        the tasks call AWS APIs and reach customer databases over peering or a
+        Lattice resource endpoint.
+    - path: '**'
+      rule_id: 'CFN_NAG_W5'
+      reason: 'cfn-nag equivalent of AwsSolutions-EC23 (egress 0.0.0.0/0). See above.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W40'
+      reason: 'Egress with protocol -1, paired with the 0.0.0.0/0 egress above. See AwsSolutions-EC23.'
+
+    # ── naming and misc cfn-nag ───────────────────────────────────────────────
+    - path: '**'
+      rule_id: 'CFN_NAG_W28'
+      reason: >-
+        Explicit resource names are the design: every name derives from the
+        ResourcePrefix parameter so two deployments can share an account, and
+        deployment/check-resource-names.py enforces it. The replacement risk
+        cfn-nag warns about is accepted knowingly.
+    # CFN_NAG_W51 ("bucket has no policy") needed an entry until the TLS-only fix
+    # gave the three remaining buckets - the two CloudFront log buckets and the
+    # reports bucket - a policy of their own. It now passes on its own merits.
+    - path: '**'
+      rule_id: 'CFN_NAG_W48'
+      reason: 'Same encryption family as CKV_AWS_158. See the customer-managed-key note above.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W70'
+      reason: 'CloudFront minimum protocol: not settable with the default certificate. See AwsSolutions-CFR4.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W33'
+      reason: 'Subnet MapPublicIpOnLaunch: the public subnets exist for the NAT gateway and the internal load balancer only.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W56'
+      reason: 'API Gateway route without an authorizer: GET /ping, the health check. See AwsSolutions-APIG4.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W13'
+      reason: 'Same wildcard set as AwsSolutions-IAM5. See the IAM note above.'
+    - path: '**'
+      rule_id: 'CFN_NAG_W76'
+      reason: 'IAM policy SPCM complexity score: a consequence of scoping actions per resource rather than granting wildcards, which is the intended direction.'
+    # CFN_NAG_W77 needs no entry. It asked for a customer-managed key on the Aurora
+    # master credential secret, and that secret is no longer declared here - RDS
+    # creates and owns it under ManageMasterUserPassword. Deleting the resource took
+    # its findings with it: W77, one of the three CKV_AWS_149 occurrences, and one
+    # detect-secrets keyword match all came from that one block.

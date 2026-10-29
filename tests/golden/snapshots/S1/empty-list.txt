@@ -1,0 +1,6 @@
+Agent Spaces
+Agent Spaces define the boundary of what DBOps Agent (Beta) can access and investigate.
+Create Agent Space
+No Agent Spaces
+Create your first Agent Space to start monitoring databases.
+Create Agent Space

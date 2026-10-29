@@ -1,0 +1,309 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: S3 + CloudFront for the DBOps Agent admin console
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, Aurora cluster identifiers and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  EnableWAF:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Attach an AWS WAFv2 WebACL (AWS managed baseline rules + per-IP rate limiting)
+      to this CloudFront distribution. Default 'true', matching master.yaml: this
+      distribution is one of only two public entry points, so it is protected unless
+      you opt out. Set 'false' if your own org-level WAF already fronts it, or to
+      avoid the cost. On a full deploy master always passes its own value, so this
+      default only takes effect when deploying this template standalone.
+  WebAclArn:
+    Type: String
+    Default: ''
+    Description: >
+      ARN of a CLOUDFRONT-scope WebACL to attach, created outside this stack. The main
+      stack passes this ONLY when the deployment Region is not us-east-1: a CLOUDFRONT
+      WebACL can only be created through the us-east-1 control plane, so a non-us-east-1
+      deploy creates it in a small us-east-1 edge stack (infrastructure/edge-waf.yaml)
+      and passes the ARN here. In us-east-1 this stays empty and the WebACL below is
+      created inline instead. Empty with EnableWAF=false means no WAF.
+
+Conditions:
+  # A CLOUDFRONT-scope WebACL can only be created in us-east-1 (AWS::WAFv2::WebACL, Scope),
+  # so this stack creates one inline ONLY in us-east-1. In any other Region the main stack
+  # supplies one via WebAclArn (built by the us-east-1 edge stack); see edge-waf.yaml.
+  WafEnabled: !And
+    - !Equals [!Ref EnableWAF, 'true']
+    - !Equals [!Ref 'AWS::Region', 'us-east-1']
+  # A WebACL built elsewhere (the us-east-1 edge stack) was passed in — used in any
+  # Region other than us-east-1 when WAF is on.
+  ExternalWaf: !Not [!Equals [!Ref WebAclArn, '']]
+
+Resources:
+  AdminBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-admin-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # NOTE: S3 server-access logging (CKV_AWS_18) is intentionally not set on
+      # this bucket. It serves static assets only via CloudFront + OAC (no
+      # direct/public access), and the CloudFront access logs above already
+      # capture all edge access. See docs/ARCHITECTURE.md#security-model.
+
+  AdminBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdminBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${AdminBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${AdminDistribution}'
+          # Deny anything that did not arrive over TLS (AwsSolutions-S10): S3
+          # accepts plain HTTP unless a policy refuses it.
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AdminBucket.Arn
+              - !Sub '${AdminBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  AdminOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ResourcePrefix}-admin-oac-${AWS::AccountId}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront access-log bucket (CKV_AWS_86 / W10). ACLs are enabled
+  # (ObjectWriter) because CloudFront standard logging delivers via the
+  # awslogsdelivery account ACL grant — that grant is account-scoped, NOT
+  # public, so all four block-public-access flags stay on.
+  AdminLogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub '${ResourcePrefix}-admin-logs-${AWS::AccountId}-${AWS::Region}'
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # Access logs record who reached the console and when, so they get the same
+  # in-transit protection as the assets.
+  AdminLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AdminLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AdminLogBucket.Arn
+              - !Sub '${AdminLogBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: 'false'
+
+  # Optional AWS WAFv2 WebACL (CLOUDFRONT scope). AWS managed baseline rule
+  # groups + per-IP rate limiting. Only created when EnableWAF=true.
+  AdminWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: WafEnabled
+    Properties:
+      Name: !Sub '${ResourcePrefix}-admin-${AWS::AccountId}'
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ResourcePrefix}-admin-waf'
+      Rules:
+        - Name: AWS-CommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: common-rule-set
+        - Name: AWS-KnownBadInputs
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: known-bad-inputs
+        - Name: AWS-IpReputation
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: ip-reputation
+        - Name: RateLimitPerIP
+          Priority: 4
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-limit
+
+  # Security response headers, including a Content-Security-Policy. Same rationale as
+  # the dashboard's policy in frontend.yaml — see the comment there for why the CSP is
+  # the right mitigation for tokens held in localStorage, and why script-src can be
+  # 'self' with no nonces. This console is the higher-value target of the two: it holds
+  # the admin token, and a script running in this origin can drive user provisioning
+  # and role assignment.
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub '${ResourcePrefix}-admin-security-headers'
+        Comment: Security headers and CSP for the DBOps Agent admin console
+        SecurityHeadersConfig:
+          ContentSecurityPolicy:
+            Override: true
+            ContentSecurityPolicy: !Sub >-
+              default-src 'self';
+              script-src 'self';
+              style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+              font-src 'self' https://fonts.gstatic.com;
+              img-src 'self' data:;
+              connect-src 'self' https://*.execute-api.${AWS::Region}.amazonaws.com
+              https://*.auth.${AWS::Region}.amazoncognito.com
+              https://cognito-idp.${AWS::Region}.amazonaws.com;
+              object-src 'none';
+              base-uri 'self';
+              frame-ancestors 'none';
+              form-action 'self' https://*.auth.${AWS::Region}.amazoncognito.com
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            Override: true
+            FrameOption: DENY
+          ReferrerPolicy:
+            Override: true
+            ReferrerPolicy: strict-origin-when-cross-origin
+          StrictTransportSecurity:
+            Override: true
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+          XSSProtection:
+            Override: true
+            Protection: true
+            ModeBlock: true
+
+  AdminDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        WebACLId: !If
+          - WafEnabled
+          - !GetAtt AdminWebACL.Arn
+          - !If [ExternalWaf, !Ref WebAclArn, !Ref 'AWS::NoValue']
+        Logging:
+          Bucket: !GetAtt AdminLogBucket.RegionalDomainName
+          Prefix: cloudfront/
+          IncludeCookies: false
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt AdminBucket.RegionalDomainName
+            OriginAccessControlId: !Ref AdminOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+          Compress: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_100
+
+Outputs:
+  AdminBucketName:
+    Value: !Ref AdminBucket
+  AdminDistributionId:
+    Value: !Ref AdminDistribution
+  AdminUrl:
+    Value: !Sub 'https://${AdminDistribution.DomainName}'
+  CloudFrontDomainName:
+    Value: !GetAtt AdminDistribution.DomainName

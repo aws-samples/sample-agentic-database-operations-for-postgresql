@@ -1,0 +1,18 @@
+Security
+Live posture for this deployment. Configurable controls reflect the deployed CloudFormation stack parameters; changing them is a stack update, not an in-app action.
+Admin audit vault
+Off
+Records are kept in S3 Object Lock (COMPLIANCE): nobody, including the account root user, can change or delete a record before it expires.
+Audit log: index only, not tamper-proof. A super admin can switch the vault on in Settings → Audit.
+Open audit settings
+365
+days retention for new records
+Per-caller rate limit
+A fairness guard on the AI paths: at most this many requests per minute per operator, so one runaway client cannot starve others. It never blocks super admins and fails open, so a generous value is safe. Keep it well above normal interactive pace.
+Change
+—
+requests / minute / caller
+deployment default ()
+Configurable controls
+Built-in protections
+Provided by the architecture rather than chosen per deployment. Rows marked “by design” are properties of the build that no runtime check confirms; the rest are read live, so they can report off.

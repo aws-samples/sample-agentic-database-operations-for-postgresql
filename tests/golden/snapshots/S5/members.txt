@@ -1,0 +1,28 @@
+billing-cluster
+aurora-postgresql · us-east-1
+Members
+Metrics (Tier 1)
+Deep scans (Tier 2)
+Trends
+CloudWatch metrics
+✕ Close
+ENDPOINTS
+CLUSTER (WRITER)
+billing-cluster.cluster-c0ffee00.us-east-1.rds.amazonaws.com
+READER
+billing-cluster.cluster-ro-c0ffee00.us-east-1.rds.amazonaws.com
+BILLING-1
+billing-1.c0ffee00.us-east-1.rds.amazonaws.com
+BILLING-2
+billing-2.c0ffee00.us-east-1.rds.amazonaws.com
+BILLING-3
+billing-3.c0ffee00.us-east-1.rds.amazonaws.com
+Members of billing-cluster
+ROLE INSTANCE AZ ENDPOINT HEALTH REPLICA LAG LAST COLLECTION
+writer billing-1 us-east-1a billing-1.c0ffee00.us-east-1.rds.amazonaws.com OK —
+<ago>
+reader billing-2 us-east-1b billing-2.c0ffee00.us-east-1.rds.amazonaws.com OK 18 ms
+<ago>
+reader billing-3 us-east-1c billing-3.c0ffee00.us-east-1.rds.amazonaws.com OK 2.4 s
+Skipped
+billing-3: not routed (10.0.1.6 has no owned host route)

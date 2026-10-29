@@ -1,0 +1,656 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Dedicated VPC for DB Optimization Agent platform
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    ConstraintDescription: >
+      2-21 characters, lowercase letters, digits and hyphens, starting with a letter.
+      Kept short because it prefixes S3 bucket names, Aurora cluster identifiers and
+      Lambda function names, which all have length limits.
+    Description: >
+      Prefix for every physical resource name. Change it to run a second, fully
+      independent installation in the same account. See docs/ARCHITECTURE.md#resource-naming.
+  VpcCidr:
+    Type: String
+    Default: '172.20.0.0/16'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-4])$'
+    Description: >
+      CIDR block for the VPC this solution creates. Change it only if it would overlap a
+      VPC you intend to peer with, since peering rejects overlapping ranges. The four
+      subnet CIDRs below must all fall inside it. /16 to /24.
+  PublicSubnet1Cidr:
+    Type: String
+    Default: '172.20.1.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: Public subnet in the first AZ. Must be inside VpcCidr.
+  PublicSubnet2Cidr:
+    Type: String
+    Default: '172.20.2.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: Public subnet in the second AZ. Must be inside VpcCidr.
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: '172.20.10.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: Private subnet in the first AZ, where the agent and API run. Must be inside VpcCidr.
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: '172.20.20.0/24'
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(1[6-9]|2[0-8])$'
+    Description: Private subnet in the second AZ, where the agent and API run. Must be inside VpcCidr.
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    Description: Retention period (days) for VPC flow logs.
+  DbPortRange:
+    Type: String
+    Default: '5432-5432'
+    AllowedPattern: '^\d{1,5}-\d{1,5}$'
+    Description: >
+      PostgreSQL port range (from-to) the Tier 2 deep scan may reach on monitored
+      databases. The scan task's security group allows egress to 5432 always (the
+      default PostgreSQL port) and to this range when it differs. Widen it (e.g. 5432-5440)
+      when a database listens on another port.
+Conditions:
+  HasCustomDbPortRange: !Not [!Equals [!Ref DbPortRange, '5432-5432']]
+
+Resources:
+  # ── AZ Resolver: pick two AZs from the AgentCore-supported set, per Region ──
+  # AgentCore Runtime VPC connectivity works only in specific AZs, and the supported
+  # set differs per Region (e.g. us-east-1 allows only 3 of its 6 AZs). There is no
+  # API for that subset, so it is pinned below from the AWS docs for the Regions this
+  # solution supports (us-east-1, eu-west-1); a deploy to any other Region fails fast
+  # with a clear message instead of a cryptic rollback. See the README "Supported
+  # regions" note, and keep the two in step.
+  # AZ names (us-east-1a, etc.) map to different physical AZ IDs per account,
+  # so we resolve at deploy time.
+  AZResolverRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: >-
+              Sole action is ec2:DescribeAvailabilityZones, a read-only call with
+              no resource-level permission support.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeAZs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:DescribeAvailabilityZones
+                Resource: '*'
+
+  AZResolverFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.handler
+      Role: !GetAtt AZResolverRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      # Cap concurrency (CKV_AWS_115 / W92) — one-shot custom resource.
+      ReservedConcurrentExecutions: 2
+      Code:
+        ZipFile: |
+          import json, logging, urllib.request, boto3
+          log = logging.getLogger()
+          log.setLevel(logging.INFO)
+
+          # AgentCore-supported AZ IDs, per Region, from the AWS docs:
+          # docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html
+          # Only the Regions this solution supports are listed; keep README in step.
+          SUPPORTED_AZ_IDS = {
+              'us-east-1': {'use1-az1', 'use1-az2', 'use1-az4'},
+              'eu-west-1': {'euw1-az1', 'euw1-az2', 'euw1-az3'},
+          }
+
+          def _respond(event, ctx, status, data=None, reason=''):
+              body = json.dumps({
+                  'Status': status,
+                  'Reason': reason or f'{ctx.log_group_name}/{ctx.log_stream_name}',
+                  'PhysicalResourceId': event.get('PhysicalResourceId') or ctx.log_stream_name,
+                  'StackId': event['StackId'], 'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {},
+              }).encode()
+              req = urllib.request.Request(event['ResponseURL'], data=body, method='PUT',
+                                           headers={'Content-Type': '', 'Content-Length': str(len(body))})
+              urllib.request.urlopen(req)
+
+          def handler(event, ctx):
+              log.info('Event: %s', json.dumps({k: v for k, v in event.items() if k != 'ResponseURL'}))
+              if event['RequestType'] == 'Delete':
+                  _respond(event, ctx, 'SUCCESS')
+                  return
+              try:
+                  ec2 = boto3.client('ec2')
+                  region = ec2.meta.region_name
+                  allowed = SUPPORTED_AZ_IDS.get(region)
+                  if not allowed:
+                      _respond(event, ctx, 'FAILED', reason=(
+                          f'Region {region} is not supported. This solution deploys to '
+                          f'{", ".join(sorted(SUPPORTED_AZ_IDS))} only, because AgentCore VPC '
+                          'connectivity is limited to specific AZs per Region (see the README '
+                          '"Supported regions" note).'))
+                      return
+                  azs = ec2.describe_availability_zones(
+                      Filters=[{'Name': 'state', 'Values': ['available']},
+                               {'Name': 'zone-type', 'Values': ['availability-zone']}]
+                  )['AvailabilityZones']
+                  supported = sorted([az['ZoneName'] for az in azs if az['ZoneId'] in allowed])
+                  if len(supported) < 2:
+                      _respond(event, ctx, 'FAILED', reason=(
+                          f'Need 2 AgentCore-supported AZs in {region}, found {supported}'))
+                      return
+                  log.info('Resolved AZs: %s', supported[:2])
+                  _respond(event, ctx, 'SUCCESS', {'AZ1': supported[0], 'AZ2': supported[1]})
+              except Exception as e:
+                  log.exception('AZ resolution failed')
+                  _respond(event, ctx, 'FAILED', reason=str(e)[:1024])
+
+  AZResolver:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt AZResolverFunction.Arn
+
+  # ── VPC ──
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-vpc'
+
+  # ── VPC Flow Logs (W60 / network-level audit trail) ──
+  # Captures accepted/rejected connection metadata for the whole VPC and writes
+  # it to a CloudWatch log group in this account. CloudWatch is region-portable
+  # (no regional bucket-policy/ACL pitfalls) and is the natural sink that
+  # Datadog/Splunk forwarders subscribe to.
+  FlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub '/${ResourcePrefix}/vpc/${AWS::StackName}/flowlogs'
+      RetentionInDays: !Ref LogRetentionDays
+
+  FlowLogRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: vpc-flow-logs.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PublishFlowLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt FlowLogGroup.Arn
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref FlowLogGroup
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-igw'
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── Public Subnets (ALB) ──
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: AZResolver
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !GetAtt AZResolver.AZ1
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-public-1'
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: AZResolver
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !GetAtt AZResolver.AZ2
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-public-2'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-public-rt'
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ── Private Subnets (AgentCore, ECS, Batch) ──
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: AZResolver
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !GetAtt AZResolver.AZ1
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-private-1'
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: AZResolver
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !GetAtt AZResolver.AZ2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-private-2'
+
+  # ── NAT Gateway (for services without VPC endpoints) ──
+  NATElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-nat-eip'
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-nat'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-private-rt'
+
+  PrivateDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ── Security Groups ──
+  PrivateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private workloads (AgentCore, ECS, Batch)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS within VPC (VPC endpoints)
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-private-sg'
+
+  # Self-referencing rule for internal communication
+  PrivateSGSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref PrivateSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref PrivateSecurityGroup
+      Description: Allow DB access within private SG
+
+  # Dedicated group for the Tier 2 scan task (AWS Batch/Fargate). The scan container holds
+  # the monitored database's password (PGPASSWORD) and the cross-account role, so it does
+  # NOT share the private workload group's all-outbound egress. Its egress is
+  # narrowed to exactly what a scan uses: 443 (AWS APIs — in-region via the interface VPC
+  # endpoints, cross-region Secrets Manager via NAT), 5432 (Postgres, reached over the
+  # per-database VPC peering / Lattice resource endpoint set up at onboarding), and 53 (DNS).
+  # A database on another port is reached through DbPortRange (DB_PORT_RANGE): when it is
+  # not the default 5432-5432 one more egress rule opens that range; 5432 itself stays
+  # open (the default PostgreSQL port). Configure warns when a database's port is outside it.
+  # No ingress: the scan only ever initiates outbound connections. Database reach itself is
+  # provisioned per-DB by the network configurator, so these ports are left open to any
+  # destination rather than dynamically rewritten on every onboard.
+  ScanSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Tier 2 scan task (Batch/Fargate) - scoped egress, no ingress
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS to AWS APIs (VPC endpoints in-region; Secrets Manager cross-region via NAT)
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+          Description: Postgres to monitored databases (over per-DB peering / Lattice endpoint)
+        - !If
+          - HasCustomDbPortRange
+          - IpProtocol: tcp
+            FromPort: !Select [0, !Split ['-', !Ref DbPortRange]]
+            ToPort: !Select [1, !Split ['-', !Ref DbPortRange]]
+            CidrIp: 0.0.0.0/0
+            Description: Postgres on the DB_PORT_RANGE ports (databases on a non-default port)
+          - !Ref AWS::NoValue
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS (TCP)
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 0.0.0.0/0
+          Description: DNS (UDP)
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-scan-sg'
+
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: VPC Endpoints HTTPS access
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from within the VPC to interface VPC endpoints
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (explicit; matches default allow-all)
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-vpce-sg'
+
+  # ── VPC Endpoints (no NAT needed) ──
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref PublicRouteTable
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+        - !Ref PublicRouteTable
+
+  ECRApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.api'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  ECRDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ecr.dkr'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.secretsmanager'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.logs'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  STSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sts'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  SNSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.sns'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  RDSEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.rds'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  BatchEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.batch'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  EC2Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  CloudWatchMetricsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.monitoring'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  PerformanceInsightsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.pi'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+  CloudTrailEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.cloudtrail'
+      VpcEndpointType: Interface
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+      SecurityGroupIds: [!Ref VPCEndpointSecurityGroup]
+      PrivateDnsEnabled: true
+
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  PublicSubnet1Id:
+    Description: Public subnet 1
+    Value: !Ref PublicSubnet1
+  PublicSubnet2Id:
+    Description: Public subnet 2
+    Value: !Ref PublicSubnet2
+  PublicSubnetIds:
+    Description: Public subnet IDs (comma-separated)
+    Value: !Sub '${PublicSubnet1},${PublicSubnet2}'
+
+  PrivateSubnet1Id:
+    Description: Private subnet 1
+    Value: !Ref PrivateSubnet1
+  PrivateSubnet2Id:
+    Description: Private subnet 2
+    Value: !Ref PrivateSubnet2
+  PrivateSubnetIds:
+    Description: Private subnet IDs (comma-separated)
+    Value: !Sub '${PrivateSubnet1},${PrivateSubnet2}'
+
+  PrivateSecurityGroupId:
+    Description: Security group for private workloads
+    Value: !Ref PrivateSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSG'
+
+  ScanSecurityGroupId:
+    Description: Dedicated egress-scoped security group for the Tier 2 scan task
+    Value: !Ref ScanSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanSG'
+
+  PrivateRouteTableId:
+    Description: Private route table ID (for VPC peering routes)
+    Value: !Ref PrivateRouteTable
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateRT'

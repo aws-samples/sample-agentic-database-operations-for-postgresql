@@ -1,0 +1,109 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+# pytest writes its own .gitignore inside this directory, so git already skips it -
+# but only via that nested file, which tooling reading the root .gitignore does not
+# see. Naming it here keeps scanners out of a cache directory whose CACHEDIR.TAG
+# signature hash otherwise reads as a hardcoded secret.
+.pytest_cache/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Deployment settings written by `make deploy`. Holds an account-specific bucket name
+# and the admin's email address - values that belong to whoever is deploying, not to
+# the repository, so committing it would ship one person's email to every clone and
+# mail them every new installation's temporary password. deploy.config.example is
+# committed in its place and documents every setting.
+deploy.config
+deploy.*.config
+!deploy.config.example
+# One folder per environment: deploy configs (deploy.<name>.config) live at the repo
+# root; each environment's build state (staged-template URL, image URIs, built web
+# apps) lives here so two terminals deploying different environments never share it.
+deployment/.state/
+# Held while one environment runs `npm ci` + build in a web app (deploy-spas.sh).
+.build.lock/
+# Old single-environment configs, kept locally for reference.
+config-backup/
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# AI assistant configuration. Steering (team conventions and product rules) is shared and
+# committed; hooks and anything else under .kiro/ are machine-local.
+.kiro/*
+!.kiro/steering/
+aidlc/
+
+# Local security scan output. Reports are generated on demand and are never committed.
+.security-agent/
+
+# Docker
+.orchestrator-image
+.batch-image
+
+# Staged deploy assets produced by deployment/build-s3-dist.sh. Regenerated from
+# source on every build, so never committed. .artifacts-env carries the resulting
+# TemplateBaseUrl / ArtifactsBucket / ArtifactsVersion for the Makefile to read.
+deployment/global-s3-assets/
+deployment/regional-s3-assets/
+deployment/.artifacts-env
+# Written by deployment/build-images.sh with the exact image URIs it pushed, for
+# deploy-stack to pass as BackendImageUri / BatchImageUri. Holds an account-specific
+# ECR registry and a timestamp tag, so it is per-machine and never committed.
+deployment/.images-env
+.layer-build/
+# Same, for the local-dev equivalent (backend/scripts/build-tier1.sh). Normally
+# cleaned up, but a failed layer build leaves it behind.
+backend/.tier1-build/
+
+# Build artifact: `make build-batch` stages a copy of backend/checks/references.yaml
+# into the batch build context so the findings engine ships the shared thresholds.
+# The source of truth is backend/checks/references.yaml — this staged copy is not committed.
+batch/references.yaml
+batch/tools/
+batch/certs/
+
+# NOTE: frontend/ and admin-console/ package-lock.json are deliberately NOT ignored.
+# Committed lock files let anyone reproduce the build with `npm ci`, and are what
+# dependency scanning and Dependabot read.
+
+# Query file
+--query
+
+# Working notes and draft documents kept locally.
+SECURITYREVIEW.md
+RELEASE_NOTES.md
+docs/*-review.md
+docs/tester-onboarding-guide.md
+
+# Scratch and reference material kept locally. The canonical health-scan script is
+# batch/postgres_health_insights.sh.
+reference/
+
+# Security review working artefacts: scan reports and threat model output. Generated
+# on demand, so not part of the source tree.
+pcsr/
+
+# Workflow scratch: task briefs, verification notes, and review reports the agents
+# write while working. Local-only process notes, not product code, so never committed.
+.agents/
+
+# Automated Security Helper scratch state. ash.yaml records which findings were
+# assessed and accepted, so that one file is tracked.
+.ash/*
+!.ash/ash.yaml

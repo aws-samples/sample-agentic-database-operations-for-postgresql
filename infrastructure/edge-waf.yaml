@@ -1,0 +1,166 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CloudFront WAF WebACLs for a DBOps Agent deployment whose main stack is NOT in
+  us-east-1. A CLOUDFRONT-scope WebACL can only be created through the us-east-1
+  control plane, but it is enforced at every CloudFront edge, so a eu-west-1 (etc.)
+  deployment still gets WAF with no added latency. `make deploy` creates this stack in
+  us-east-1 when ENABLE_WAF is on outside us-east-1 and passes its two WebACL ARNs into
+  the main stack. A us-east-1 deploy skips it and creates the same WebACLs inline, so
+  there is one WebACL per distribution either way. The rules match those inline ones
+  (kept in step by tests/test_region_gated_features.py); WebACL names carry the account
+  id and app Region, so deployments in different Regions of one account never collide.
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Default: dbops
+    AllowedPattern: '^[a-z][a-z0-9-]{1,20}$'
+    Description: >
+      Prefix for every physical resource name, matching the main stack.
+  AppRegion:
+    Type: String
+    AllowedPattern: '^[a-z]{2}-[a-z]+-[0-9]+$'
+    Description: >
+      The Region the main stack is deployed to (e.g. eu-west-1). Part of each WebACL
+      name so two deployments in different Regions of one account never collide — the
+      WebACLs themselves live in us-east-1 (CLOUDFRONT scope) regardless.
+
+Resources:
+  # The dashboard (operator app) CloudFront WebACL. AWS managed baseline rule groups
+  # plus a per-IP rate limit. CloudFront sees real client IPs, so rate-based and
+  # IP-reputation rules are effective here (unlike the internal ALB).
+  FrontendWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${ResourcePrefix}-dashboard-${AWS::AccountId}-${AppRegion}'
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ResourcePrefix}-dashboard-waf-${AppRegion}'
+      Rules:
+        - Name: AWS-CommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: common-rule-set
+        - Name: AWS-KnownBadInputs
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: known-bad-inputs
+        - Name: AWS-IpReputation
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: ip-reputation
+        - Name: RateLimitPerIP
+          Priority: 4
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-limit
+
+  # The admin console CloudFront WebACL — same rule set. This console is the
+  # higher-value target: it holds the admin token and drives user provisioning and
+  # role assignment, so it is protected on exactly the same terms as the dashboard.
+  AdminWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub '${ResourcePrefix}-admin-${AWS::AccountId}-${AppRegion}'
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub '${ResourcePrefix}-admin-waf-${AppRegion}'
+      Rules:
+        - Name: AWS-CommonRuleSet
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: common-rule-set
+        - Name: AWS-KnownBadInputs
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: known-bad-inputs
+        - Name: AWS-IpReputation
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: ip-reputation
+        - Name: RateLimitPerIP
+          Priority: 4
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: rate-limit
+
+Outputs:
+  FrontendWebAclArn:
+    Description: ARN of the dashboard CloudFront WebACL, for the main stack's FrontendStack
+    Value: !GetAtt FrontendWebACL.Arn
+  AdminWebAclArn:
+    Description: ARN of the admin console CloudFront WebACL, for the main stack's AdminConsoleStack
+    Value: !GetAtt AdminWebACL.Arn

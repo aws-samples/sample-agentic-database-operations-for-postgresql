@@ -1,0 +1,45 @@
+Payments
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+1 database
+metadata refreshed for 0 of 0
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+Databases
+1 onboarded
+Agent capabilitiesoptional
+Defaults in use — review if this space needs its own knowledge or model
+4
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Discover & onboard
+Scans each account in its regions for PostgreSQL databases. Onboard the ones this space should include by supplying a read-only user's secret — that is what makes a database part of this space.
+Run discovery again
+Onboarded databases (1)
+All 1
+Delete failed 1
+Configure monitoring
+1 database
+NAME ACCOUNT ENGINE REGION ENDPOINT STATUS MONITORING ACTIONS
+orders-replica
+replica of orders-db
+111122223333 RDS PostgreSQL us-east-1 orders-replica.c0ffee00.us-east-1.rds.amazonaws.com Delete failed
+TIER 1 · METRICS
+5 min
+TIER 2 · SCAN
+Daily
+Retry
+Removal incomplete: The network teardown did not finish. Retry finishes it; the steps below say what is left.
+Deleted route to pcx-0abc in rtb-0def
+Teardown stopped at VPC peering pcx-0abc: it is still active
+Configuration log
+Accounts & regions
+Next: Agent capabilities

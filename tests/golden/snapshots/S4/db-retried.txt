@@ -1,0 +1,32 @@
+Payments
+Owner: alice@example.com
+Overview
+Audit log
+Active
+This Agent Space sets the boundary of databases DBOps Agent (Beta) can reach. Work through the steps below to start monitoring.
+Topology generated <date>
+0 databases
+metadata refreshed for 0 of 0
+1 account
+1 region
+Accounts & regions
+1 account · 1 region validated
+2
+Databases
+Run discovery, then onboard with a read-only secret
+Agent capabilitiesoptional
+Knowledge, skills and model for this space
+Operators
+Nobody can open this space yet
+Topology
+Map generated <date>
+Discover & onboard
+Scans each account in its regions for PostgreSQL databases. Onboard the ones this space should include by supplying a read-only user's secret — that is what makes a database part of this space.
+Run discovery
+Onboarded databases (0)
+All 0
+No databases onboarded yet.
+Run discovery above, then onboard each database with its read-only secret.
+Accounts & regions
+Run discovery, then onboard with a read-only secret
+Next: Agent capabilities
