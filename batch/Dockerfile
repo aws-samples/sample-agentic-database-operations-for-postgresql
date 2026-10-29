@@ -3,7 +3,7 @@
 
 # Base image pinned by digest for a reproducible, tamper-resistant build (the tag is
 # kept for readability). Dependabot refreshes the digest when a newer image ships.
-FROM public.ecr.aws/docker/library/python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
+FROM public.ecr.aws/docker/library/python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
