@@ -17,7 +17,7 @@ pyyaml==6.0.3
 # and xref chains). Pinned well past it because knowledge_store feeds PdfReader
 # operator-uploaded bytes; only PdfReader/.pages/.extract_text() are used, which
 # are unchanged across the 5.x -> 6.x boundary.
-pypdf==6.21.2
+pypdf==6.21.3
 # IAM-signed MCP client for the AgentCore Web Search Gateway connector (docs_agent).
 # Only used when WEB_SEARCH_GATEWAY_URL is set; import is guarded so it's optional.
 mcp-proxy-for-aws==1.7.0
