@@ -59,9 +59,6 @@ _strands = types.ModuleType("strands")
 _strands.Agent = FakeAgent
 _strands.tool = lambda f=None, **kw: (f if f is not None else (lambda g: g))
 sys.modules["strands"] = _strands
-_strands_tools = types.ModuleType("strands_tools")
-_strands_tools.current_time = lambda: "now"
-sys.modules["strands_tools"] = _strands_tools
 for _m in ("psycopg2", "psycopg2.extras", "boto3"):
     sys.modules.setdefault(_m, types.ModuleType(_m))
 

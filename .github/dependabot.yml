@@ -1,7 +1,9 @@
 # Dependabot keeps the pinned dependencies and base-image digests from silently going
-# stale. It opens a pull request (including security updates for known CVEs) when a newer
-# version or digest is available, so a digest-pinned base image or a hashed dependency
-# lock cannot quietly fall behind on patches. A maintainer reviews and merges the PR.
+# stale. Security updates for known CVEs open a pull request as soon as a fix is
+# published. Routine version updates run monthly and are grouped so that each ecosystem
+# gets one pull request for its minor and patch bumps; a major version bump always gets
+# its own pull request, because it needs a maintainer's judgement. A maintainer reviews
+# and merges the PRs.
 #
 # After a Python dependency PR, refresh the hashed locks with `make lock` (Dependabot
 # updates the declared versions; the --require-hashes locks are regenerated from them).
@@ -11,40 +13,56 @@ updates:
   - package-ecosystem: "pip"
     directory: "/backend"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
   - package-ecosystem: "pip"
     directory: "/batch"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
 
   # ── Container base images (digest pins) ──
   - package-ecosystem: "docker"
     directory: "/backend"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 2
   - package-ecosystem: "docker"
     directory: "/batch"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 2
   - package-ecosystem: "docker"
     directory: "/admin-console"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 2
   - package-ecosystem: "docker"
     directory: "/frontend"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    open-pull-requests-limit: 2
 
   # ── Front-end JavaScript dependencies ──
   - package-ecosystem: "npm"
     directory: "/admin-console"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    groups:
+      npm-minor-patch:
+        update-types: ["minor", "patch"]

@@ -13,7 +13,7 @@ from typing import AsyncIterator
 
 from strands import Agent, tool
 from model_resolver import effective_model_id, build_bedrock_model
-from strands_tools import current_time
+from tools.clock import current_time
 
 from tools.types import SubAgentResult
 from sub_agents.check_outcome import CheckOutcomes, failed_specialist_answer

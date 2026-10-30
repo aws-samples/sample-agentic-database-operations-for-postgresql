@@ -4,26 +4,38 @@
 # hashes; it is what the image installs (pip install --require-hashes). Regenerate
 # the lock after editing this file:  make lock   (see deployment/lock-requirements.sh).
 
-strands-agents==1.45.0
-strands-agents-tools==0.8.2
-fastapi==0.123.1
+strands-agents==1.48.0
+fastapi==0.162.0
 uvicorn[standard]==0.38.0
-boto3==1.43.36
-python-dotenv==1.2.2
+boto3==1.43.118
+python-dotenv==1.2.4
 bedrock-agentcore==1.18.1
-psycopg2-binary==2.9.10
-pyyaml==6.0.2
+psycopg2-binary==2.9.13
+pyyaml==6.0.3
 # 6.7.5 is the floor that clears the 5.x decode-stream DoS advisories (malformed
 # Flate/LZW/RunLength/ASCIIHex streams exhausting RAM, infinite loops on outlines
 # and xref chains). Pinned well past it because knowledge_store feeds PdfReader
 # operator-uploaded bytes; only PdfReader/.pages/.extract_text() are used, which
 # are unchanged across the 5.x -> 6.x boundary.
-pypdf==6.15.0
+pypdf==6.21.2
 # IAM-signed MCP client for the AgentCore Web Search Gateway connector (docs_agent).
 # Only used when WEB_SEARCH_GATEWAY_URL is set; import is guarded so it's optional.
-mcp-proxy-for-aws==1.6.2
+mcp-proxy-for-aws==1.7.0
 # In-app JWT signature verification against the Cognito JWKS (defense-in-depth,
 # LOG-ONLY phase — utils/auth.py). The [crypto] extra pulls `cryptography` for the
 # RS256 verification Cognito uses. Import is guarded: if unavailable, log-only
 # verification degrades to a no-op and never blocks a request.
-PyJWT[crypto]==2.13.0
+PyJWT[crypto]==2.15.1
+
+# urllib3 >= 2.8.0 clears PYSEC-2026-4175, -4176 and -4177.
+urllib3>=2.8.0
+# starlette >= 1.3.1 clears the 2026 PYSEC advisories on the 0.50 line; fastapi only requires >= 0.46.
+starlette>=1.3.1
+# opentelemetry-api >= 1.45.1 clears CVE-2026-114603 (transitive via strands-agents).
+opentelemetry-api>=1.45.1
+# fastmcp >= 3.4.10 clears GHSA-7xgj-8392-5q4r (transitive via mcp-proxy-for-aws).
+fastmcp>=3.4.10
+# authlib >= 1.9.1 clears PYSEC-2026-4356 and CVE-2026-96760; dnspython >= 2.9.0 clears
+# CVE-2026-114605. Both are transitive via fastmcp.
+authlib>=1.9.1
+dnspython>=2.9.0

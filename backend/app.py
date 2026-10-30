@@ -23,7 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, StrictBool, StrictInt
 from strands import Agent, tool
 from strands.models.bedrock import BedrockModel
-from strands_tools import current_time
+from tools.clock import current_time
 
 # Orchestrator-level tools (lightweight, no DB connection)
 from tools.db_tools import list_monitored_databases, get_report_analysis, get_historical_metrics, get_instance_details, assess_growth

@@ -21,21 +21,6 @@ aiofile 3.12.3
   Source:  https://github.com/mosquito/aiofile
   Used by: backend
 
-aiohappyeyeballs 2.7.1
-  Licence: Python Software Foundation License
-  Source:  https://github.com/aio-libs/aiohappyeyeballs
-  Used by: backend
-
-aiohttp 3.14.3
-  Licence: Apache-2.0 AND MIT
-  Source:  https://github.com/aio-libs/aiohttp
-  Used by: backend
-
-aiosignal 1.4.0
-  Licence: Apache Software License
-  Source:  https://github.com/aio-libs/aiosignal
-  Used by: backend
-
 annotated-doc 0.0.5
   Licence: MIT
   Source:  https://github.com/fastapi/annotated-doc
@@ -56,17 +41,12 @@ attrs 26.1.0
   Source:  https://github.com/python-attrs/attrs
   Used by: backend
 
-Authlib 1.8.0
+Authlib 1.9.1
   Licence: BSD License
   Source:  https://github.com/authlib/authlib
   Used by: backend
 
-aws-requests-auth 0.4.3
-  Licence: BSD License
-  Source:  https://github.com/davidmuller/aws-requests-auth
-  Used by: backend
-
-awscrt 0.36.0
+awscrt 0.38.0
   Licence: Apache-2.0
   Source:  https://github.com/awslabs/aws-crt-python
   Used by: backend
@@ -76,22 +56,17 @@ beartype 0.22.9
   Source:  https://github.com/beartype/beartype
   Used by: backend
 
-beautifulsoup4 4.15.0
-  Licence: MIT License
-  Source:  https://www.crummy.com/software/BeautifulSoup/bs4/
-  Used by: backend
-
 bedrock-agentcore 1.18.1
   Licence: Apache Software License
   Source:  https://github.com/aws/bedrock-agentcore-sdk-python
   Used by: backend
 
-boto3 1.43.36
+boto3 1.43.118
   Licence: Apache-2.0
   Source:  https://github.com/boto/boto3
   Used by: backend, batch
 
-botocore 1.43.93
+botocore 1.43.122
   Licence: Apache-2.0
   Source:  https://github.com/boto/botocore
   Used by: backend, batch
@@ -106,19 +81,14 @@ caio 0.12.4
   Source:  https://github.com/mosquito/caio/
   Used by: backend
 
-certifi 2026.7.22
+certifi 2026.10.23
   Licence: Mozilla Public License 2.0 (MPL 2.0)
-  Source:  https://pypi.org/project/certifi/2026.7.22/
+  Source:  https://pypi.org/project/certifi/2026.10.23/
   Used by: backend
 
 cffi 2.1.1
   Licence: MIT-0
   Source:  https://github.com/python-cffi/cffi
-  Used by: backend
-
-charset-normalizer 3.5.1
-  Licence: MIT
-  Source:  https://github.com/jawah/charset_normalizer
   Used by: backend
 
 click 8.5.0
@@ -136,13 +106,8 @@ cyclopts 4.25.2
   Source:  https://github.com/BrianPugh/cyclopts
   Used by: backend
 
-dill 0.4.1
-  Licence: BSD License
-  Source:  https://github.com/uqfoundation/dill
-  Used by: backend
-
-dnspython 2.8.0
-  Licence: ISC License (ISCL)
+dnspython 2.9.1
+  Licence: ISC
   Source:  https://github.com/rthalley/dnspython
   Used by: backend
 
@@ -161,24 +126,19 @@ exceptiongroup 1.3.1
   Source:  https://github.com/agronholm/exceptiongroup
   Used by: backend
 
-fastapi 0.123.1
+fastapi 0.162.0
   Licence: MIT
   Source:  https://github.com/fastapi/fastapi
   Used by: backend
 
-fastmcp 3.4.0
+fastmcp 3.4.11
   Licence: Apache-2.0
   Source:  https://github.com/PrefectHQ/fastmcp
   Used by: backend
 
-fastmcp-slim 3.4.0
+fastmcp-slim 3.4.11
   Licence: Apache-2.0
   Source:  https://github.com/PrefectHQ/fastmcp
-  Used by: backend
-
-frozenlist 1.8.0
-  Licence: Apache-2.0
-  Source:  https://github.com/aio-libs/frozenlist
   Used by: backend
 
 griffelib 2.3.0
@@ -270,17 +230,12 @@ markdown-it-py 4.2.0
   Source:  https://github.com/executablebooks/markdown-it-py
   Used by: backend
 
-markdownify 1.2.3
-  Licence: MIT License
-  Source:  http://github.com/matthewwithanm/python-markdownify
-  Used by: backend
-
 mcp 1.30.0
   Licence: MIT License
   Source:  https://github.com/modelcontextprotocol/python-sdk
   Used by: backend
 
-mcp-proxy-for-aws 1.6.2
+mcp-proxy-for-aws 1.7.0
   Licence: Apache Software License
   Source:  https://github.com/aws/mcp-proxy-for-aws
   Used by: backend
@@ -295,42 +250,32 @@ more-itertools 11.1.0
   Source:  https://github.com/more-itertools/more-itertools
   Used by: backend
 
-mpmath 1.3.0
-  Licence: BSD License
-  Source:  http://mpmath.org/
-  Used by: backend
-
-multidict 6.8.0
-  Licence: Apache License 2.0
-  Source:  https://github.com/aio-libs/multidict
-  Used by: backend
-
 openapi-pydantic 0.5.1
   Licence: MIT License
   Source:  https://github.com/mike-oakley/openapi-pydantic
   Used by: backend
 
-opentelemetry-api 1.44.0
+opentelemetry-api 1.45.2
   Licence: Apache-2.0
   Source:  https://github.com/open-telemetry/opentelemetry-python
   Used by: backend
 
-opentelemetry-instrumentation 0.65b0
+opentelemetry-instrumentation 0.66b2
   Licence: Apache-2.0
   Source:  https://github.com/open-telemetry/opentelemetry-python-contrib
   Used by: backend
 
-opentelemetry-instrumentation-threading 0.65b0
+opentelemetry-instrumentation-threading 0.66b2
   Licence: Apache-2.0
   Source:  https://github.com/open-telemetry/opentelemetry-python-contrib
   Used by: backend
 
-opentelemetry-sdk 1.44.0
+opentelemetry-sdk 1.45.2
   Licence: Apache-2.0
   Source:  https://github.com/open-telemetry/opentelemetry-python
   Used by: backend
 
-opentelemetry-semantic-conventions 0.65b0
+opentelemetry-semantic-conventions 0.66b2
   Licence: Apache-2.0
   Source:  https://github.com/open-telemetry/opentelemetry-python
   Used by: backend
@@ -345,29 +290,14 @@ pathable 0.6.0
   Source:  https://github.com/p1c2u/pathable
   Used by: backend
 
-pillow 12.3.0
-  Licence: MIT-CMU
-  Source:  https://github.com/python-pillow/Pillow
-  Used by: backend
-
 platformdirs 4.11.8
   Licence: MIT
   Source:  https://github.com/tox-dev/platformdirs
   Used by: backend
 
-prompt_toolkit 3.0.53
-  Licence: BSD License
-  Source:  https://github.com/prompt-toolkit/python-prompt-toolkit
-  Used by: backend
-
-propcache 0.5.2
-  Licence: Apache Software License
-  Source:  https://github.com/aio-libs/propcache
-  Used by: backend
-
-psycopg2-binary 2.9.10
+psycopg2-binary 2.9.13
   Licence: GNU Library or Lesser General Public License (LGPL)
-  Source:  https://pypi.org/project/psycopg2-binary/2.9.10/
+  Source:  https://pypi.org/project/psycopg2-binary/2.9.13/
   Used by: backend, batch
 
 py-key-value-aio 0.4.5
@@ -399,12 +329,12 @@ Pygments 2.21.0
   Source:  https://github.com/pygments/pygments
   Used by: backend
 
-PyJWT 2.13.0
+PyJWT 2.15.1
   Licence: MIT
   Source:  https://github.com/jpadilla/pyjwt
   Used by: backend
 
-pypdf 6.15.0
+pypdf 6.21.2
   Licence: BSD-3-Clause
   Source:  https://github.com/py-pdf/pypdf
   Used by: backend
@@ -419,7 +349,7 @@ python-dateutil 2.9.0.post0
   Source:  https://github.com/dateutil/dateutil
   Used by: backend, batch
 
-python-dotenv 1.2.2
+python-dotenv 1.2.4
   Licence: BSD-3-Clause
   Source:  https://github.com/theskumar/python-dotenv
   Used by: backend
@@ -429,7 +359,7 @@ python-multipart 0.0.32
   Source:  https://github.com/Kludex/python-multipart
   Used by: backend
 
-PyYAML 6.0.2
+PyYAML 6.0.3
   Licence: MIT License
   Source:  https://pyyaml.org/
   Used by: backend, batch
@@ -437,11 +367,6 @@ PyYAML 6.0.2
 referencing 0.37.0
   Licence: MIT
   Source:  https://github.com/python-jsonschema/referencing
-  Used by: backend
-
-requests 2.34.2
-  Licence: Apache Software License
-  Source:  https://github.com/psf/requests
   Used by: backend
 
 rich 14.3.4
@@ -469,49 +394,19 @@ six 1.17.0
   Source:  https://github.com/benjaminp/six
   Used by: backend, batch
 
-slack_bolt 1.30.0
-  Licence: MIT License
-  Source:  https://github.com/slackapi/bolt-python
-  Used by: backend
-
-slack_sdk 3.44.1
-  Licence: MIT License
-  Source:  https://github.com/slackapi/python-slack-sdk
-  Used by: backend
-
-soupsieve 2.9.2
-  Licence: MIT
-  Source:  https://github.com/facelessuser/soupsieve
-  Used by: backend
-
 sse-starlette 3.4.11
   Licence: BSD-3-Clause
   Source:  https://github.com/sysid/sse-starlette
   Used by: backend
 
-starlette 0.50.0
+starlette 1.10.0
   Licence: BSD-3-Clause
   Source:  https://github.com/Kludex/starlette
   Used by: backend
 
-strands-agents 1.45.0
+strands-agents 1.48.0
   Licence: Apache Software License
   Source:  https://github.com/strands-agents/harness-sdk
-  Used by: backend
-
-strands-agents-tools 0.8.2
-  Licence: Apache Software License
-  Source:  https://github.com/strands-agents/tools
-  Used by: backend
-
-sympy 1.14.0
-  Licence: BSD License
-  Source:  https://sympy.org
-  Used by: backend
-
-tenacity 9.1.4
-  Licence: Apache Software License
-  Source:  https://github.com/jd/tenacity
   Used by: backend
 
 typing-inspection 0.4.4
@@ -529,7 +424,7 @@ uncalled-for 0.4.0
   Source:  https://github.com/chrisguidry/uncalled-for
   Used by: backend
 
-urllib3 2.7.0
+urllib3 2.8.0
   Licence: MIT
   Source:  https://github.com/urllib3/urllib3
   Used by: backend, batch
@@ -562,11 +457,6 @@ websockets 17.1
 wrapt 2.4.1
   Licence: BSD-2-Clause
   Source:  https://github.com/GrahamDumpleton/wrapt
-  Used by: backend
-
-yarl 1.24.5
-  Licence: Apache-2.0
-  Source:  https://github.com/aio-libs/yarl
   Used by: backend
 
 
@@ -606,12 +496,12 @@ JavaScript packages bundled into the web apps (production dependencies)
 @types/prop-types 15.7.15
   Licence: MIT
   Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
-  Used by: frontend
+  Used by: admin-console, frontend
 
-@types/react 18.3.28
+@types/react 18.3.31
   Licence: MIT
   Source:  https://github.com/DefinitelyTyped/DefinitelyTyped
-  Used by: frontend
+  Used by: admin-console, frontend
 
 @types/unist 2.0.11, 3.0.3
   Licence: MIT
@@ -661,7 +551,7 @@ comma-separated-tokens 2.0.3
 csstype 3.2.3
   Licence: MIT
   Source:  https://github.com/frenic/csstype
-  Used by: frontend
+  Used by: admin-console, frontend
 
 debug 4.4.3
   Licence: MIT
@@ -763,7 +653,7 @@ loose-envify 1.4.0
   Source:  https://github.com/zertosh/loose-envify
   Used by: admin-console, frontend
 
-lucide-react 1.47.0
+lucide-react 1.61.0
   Licence: ISC
   Source:  https://github.com/lucide-icons/lucide
   Used by: admin-console, frontend
@@ -1018,7 +908,7 @@ react-dom 18.3.1
   Source:  https://github.com/facebook/react
   Used by: admin-console, frontend
 
-react-markdown 9.1.0
+react-markdown 10.1.0
   Licence: MIT
   Source:  https://github.com/remarkjs/react-markdown
   Used by: frontend
